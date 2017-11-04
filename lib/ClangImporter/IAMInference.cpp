@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 //
@@ -22,6 +22,7 @@
 #include "swift/Basic/StringExtras.h"
 #include "clang/AST/ASTContext.h"
 #include "clang/AST/Decl.h"
+#include "clang/Lex/Preprocessor.h"
 #include "clang/Sema/Sema.h"
 #include "clang/Sema/Lookup.h"
 #include "llvm/ADT/Statistic.h"
@@ -88,7 +89,7 @@ IAMOptions IAMOptions::getDefault() { return {}; }
 // As append, but skip a repeated word at the boundary. First-letter-case
 // insensitive.
 // Example: appendUniq("FooBar", "barBaz") ==> "FooBarBaz"
-void appendUniq(NameBuffer &src, StringRef toAppend) {
+static void appendUniq(NameBuffer &src, StringRef toAppend) {
   if (src.empty()) {
     src = toAppend;
     return;
@@ -102,7 +103,7 @@ void appendUniq(NameBuffer &src, StringRef toAppend) {
   src.append(wI.getRestOfStr());
 }
 
-StringRef skipLeadingUnderscores(StringRef str) {
+static StringRef skipLeadingUnderscores(StringRef str) {
   while (!str.empty() && str.startswith("_"))
     str = str.drop_front(1);
   return str;
@@ -165,6 +166,32 @@ static unsigned dropWordUniq(StringRef str, StringRef word, NameBuffer &out) {
   return numDropped;
 }
 
+static clang::Module *getSubmodule(const clang::NamedDecl *decl, clang::Sema &clangSema) {
+  if (auto m = decl->getImportedOwningModule())
+    return m;
+  if (auto m = decl->getLocalOwningModule())
+    return m;
+  if (auto m = clangSema.getPreprocessor().getCurrentModule())
+    return m;
+  if (auto m = clangSema.getPreprocessor().getCurrentLexerSubmodule())
+    return m;
+
+  return nullptr;
+}
+
+static clang::Module *getTopModule(clang::Module *m) {
+  while (m->Parent)
+    m = m->Parent;
+  return m;
+}
+static clang::Module *getTopModule(const clang::NamedDecl *decl, clang::Sema &clangSema) {
+  auto m = getSubmodule(decl, clangSema);
+  if (!m)
+    return nullptr;
+  return getTopModule(m);
+}
+
+
 namespace {
 class IAMInference {
   ASTContext &context;
@@ -194,14 +221,31 @@ private:
                                 EffectiveClangContext effectiveDC) {
     ++SuccessImportAsConstructor;
     NameBuffer buf;
+    StringRef prefix = buf;
     if (name != initSpecifier) {
       assert(name.size() > initSpecifier.size() &&
              "should have more words in it");
-      auto didDrop = dropWordUniq(name, initSpecifier, buf);
+      bool didDrop = dropWordUniq(name, initSpecifier, buf);
       (void)didDrop;
+      prefix = buf;
+
+      // Skip "with"
+      auto prefixWords = camel_case::getWords(prefix);
+      if (prefixWords.begin() != prefixWords.end() &&
+          (*prefixWords.begin() == "With" || *prefixWords.begin() == "with")) {
+        prefix = prefix.drop_front(4);
+      }
+
+      // Skip "CF" or "NS"
+      prefixWords = camel_case::getWords(prefix);
+      if (prefixWords.begin() != prefixWords.end() &&
+          (*prefixWords.begin() == "CF" || *prefixWords.begin() == "NS")) {
+        prefix = prefix.drop_front(2);
+      }
+
       assert(didDrop != 0 && "specifier not present?");
     }
-    return {formDeclName("init", params, buf), effectiveDC};
+    return {formDeclName("init", params, prefix), effectiveDC};
   }
 
   // Instance computed property
@@ -387,9 +431,8 @@ private:
 
     SmallVector<OmissionTypeName, 8> paramTypeNames;
     for (auto param : params) {
-      paramTypeNames.push_back(
-          ClangImporter::Implementation::getClangTypeNameForOmission(
-              clangSema.getASTContext(), param->getType()));
+      paramTypeNames.push_back(getClangTypeNameForOmission(
+          clangSema.getASTContext(), param->getType()));
     }
 
     auto humbleBaseName = getHumbleIdentifier(baseName);
@@ -428,7 +471,7 @@ private:
               typedefType->getDecl()->getCanonicalDecl())) {
         if (pointeeInfo.isRecord() || pointeeInfo.isTypedef())
           return {typedefType->getDecl()->getCanonicalDecl()};
-        assert(pointeeInfo.isConstVoid() && "no other type");
+        assert(pointeeInfo.isVoid() && "no other type");
         return {};
       }
       qt = qt.getSingleStepDesugaredType(clangSema.getASTContext());
@@ -454,13 +497,12 @@ private:
     return {};
   }
 };
-}
+} // end anonymous namespace
 
 static StringRef getTypeName(clang::QualType qt) {
   if (auto typedefTy = qt->getAs<clang::TypedefType>()) {
     // Check for a CF type name (drop the "Ref")
-    auto cfName = ClangImporter::Implementation::getCFTypeName(
-        typedefTy->getDecl()->getCanonicalDecl());
+    auto cfName = getCFTypeName(typedefTy->getDecl()->getCanonicalDecl());
     if (cfName != StringRef())
       return cfName;
   }
@@ -613,6 +655,19 @@ bool IAMInference::validToImportAsProperty(
 
   auto getterDecl = isGet ? originalDecl : pairedAccessor;
   auto setterDecl = isGet ? pairedAccessor : originalDecl;
+
+  if (getTopModule(getterDecl, clangSema) !=
+      getTopModule(setterDecl, clangSema)) {
+    // We paired up decls from two different modules, so either we still infer
+    // as a getter with no setter, or we cannot be a property
+    if (isGet) {
+      pairedAccessor = nullptr;
+      setterDecl = nullptr;
+    } else  {
+      // This is set-only as far as we're concerned
+      return false;
+    }
+  }
 
   if (!selfIndex)
     return isValidAsStaticProperty(getterDecl, setterDecl);

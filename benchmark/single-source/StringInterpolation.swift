@@ -2,15 +2,20 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 
 import TestsUtils
+
+public let StringInterpolation = BenchmarkInfo(
+  name: "StringInterpolation",
+  runFunction: run_StringInterpolation,
+  tags: [.validation, .api, .String])
 
 class RefTypePrintable : CustomStringConvertible {
   var description: String {
@@ -29,13 +34,14 @@ public func run_StringInterpolation(_ N: Int) {
     var result = 0
     for _ in 1...reps {
       let s = "\(anInt) abcdefdhijklmn \(aRefCountedObject) abcdefdhijklmn \u{01}"
+      let utf16 = s.utf16
 
       // FIXME: if String is not stored as UTF-16 on this platform, then the
       // following operation has a non-trivial cost and needs to be replaced
       // with an operation on the native storage type.
-      result = result &+ Int(s.utf16[s.utf16.endIndex.predecessor()])
+      result = result &+ Int(utf16[utf16.index(before: utf16.endIndex)])
     }
-    CheckResults(result == refResult, "IncorrectResults in StringInterpolation: \(result) != \(refResult)")
+    CheckResults(result == refResult)
   }
 }
 

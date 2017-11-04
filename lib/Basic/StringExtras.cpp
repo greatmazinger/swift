@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 //
@@ -14,7 +14,7 @@
 // names.
 //
 //===----------------------------------------------------------------------===//
-#include "swift/Basic/Fallthrough.h"
+
 #include "swift/Basic/StringExtras.h"
 #include "clang/Basic/CharInfo.h"
 #include "llvm/ADT/ArrayRef.h"
@@ -22,16 +22,27 @@
 #include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringSwitch.h"
+#include "llvm/Support/Compiler.h"
 #include <algorithm>
 
 using namespace swift;
 using namespace camel_case;
 
 bool swift::canBeArgumentLabel(StringRef identifier) {
-  if (identifier == "var" || identifier == "let" || identifier == "inout")
+  if (identifier == "var" || identifier == "let" || identifier == "inout" ||
+      identifier == "$")
     return false;
 
   return true;
+}
+
+bool swift::canBeMemberName(StringRef identifier) {
+  return llvm::StringSwitch<bool>(identifier)
+    .Case("init", false)
+    .Case("Protocol", false)
+    .Case("self", false)
+    .Case("Type", false)
+    .Default(true);
 }
 
 PrepositionKind swift::getPrepositionKind(StringRef word) {
@@ -136,7 +147,9 @@ void WordIterator::computeNextPosition() const {
       ++endOfNext;
 
     // If the next word is a plural suffix, add it on.
-    if (i == n || isPluralSuffix(String.slice(i, endOfNext)))
+    if (i == n || 
+        (isPluralSuffix(String.slice(i, endOfNext)) &&
+         String.slice(i-1, endOfNext) != "Is"))
       NextPosition = endOfNext;
     else if (clang::isLowercase(String[i]))
       NextPosition = i-1;
@@ -165,10 +178,8 @@ void WordIterator::computePrevPosition() const {
     --i;
 
   // If what we found is a plural suffix, keep going.
-  bool skippedPluralSuffix = false;
   unsigned effectiveEndPosition = Position;
   if (i > 0 && isPluralSuffix(String.slice(i, Position))) {
-    skippedPluralSuffix = true;
     effectiveEndPosition = i;
     while (i > 0 && !clang::isUppercase(String[i-1]) && String[i-1] != '_')
       --i;
@@ -319,7 +330,7 @@ size_t camel_case::findWord(StringRef string, StringRef word) {
 
     // If any of the following checks fail, we want to start searching
     // past the end of the match.  (This assumes that the word doesn't
-    // end with a prefix of itself, e.g. "LikeableLike".)
+    // end with a prefix of itself, e.g. "LikableLike".)
     startingIndex = index + word.size();
 
     // We assume that we don't have to check if the match starts a new
@@ -332,15 +343,6 @@ size_t camel_case::findWord(StringRef string, StringRef word) {
 
     return index;
   }
-}
-
-/// Determine whether the given identifier is a keyword.
-static bool isKeyword(StringRef identifier) {
-  return llvm::StringSwitch<bool>(identifier)
-#define KEYWORD(kw) .Case(#kw, true)
-#define SIL_KEYWORD(kw)
-#include "swift/Parse/Tokens.def"
-    .Default(false);
 }
 
 /// Skip a type suffix that can be dropped.
@@ -667,7 +669,7 @@ static StringRef omitNeedlessWords(StringRef name,
                             NameRole::Partial, allPropertyNames, scratch);
       if (shortenedNameWord == newShortenedNameWord &&
           shortenedNameWord.back() == 'e') {
-        shortenedNameWord.drop_back();
+        (void)shortenedNameWord.drop_back();
         newShortenedNameWord =
           omitNeedlessWords(shortenedNameWord, typeName.CollectionElement,
                             NameRole::Partial, allPropertyNames, scratch);
@@ -780,7 +782,7 @@ static StringRef omitNeedlessWords(StringRef name,
           break;
         }
 
-        SWIFT_FALLTHROUGH;
+        LLVM_FALLTHROUGH;
 
       case PartOfSpeech::Verb:
       case PartOfSpeech::Gerund:
@@ -810,9 +812,9 @@ static StringRef omitNeedlessWords(StringRef name,
   case NameRole::BaseName:
   case NameRole::BaseNameSelf:
   case NameRole::Property:
-    // If we ended up with a keyword for a property name or base name,
+    // If we ended up with something that can't be a member name, do nothing.
     // do nothing.
-    if (isKeyword(name))
+    if (!canBeMemberName(name))
       return origName;
 
     // If we ended up with a vacuous name like "get" or "set", do nothing.
@@ -854,14 +856,13 @@ camel_case::toLowercaseInitialisms(StringRef string,
   // Lowercase until we hit the an uppercase letter followed by a
   // non-uppercase letter.
   llvm::SmallString<32> scratchStr;
-  scratchStr.push_back(clang::toLowercase(string[0]));
-  for (unsigned i = 1, n = string.size(); i != n; ++i) {
+  for (unsigned i = 0, n = string.size(); i != n; ++i) {
     // If the next character is not uppercase, stop.
     if (i < n - 1 && !clang::isUppercase(string[i+1])) {
       // If the next non-uppercase character was not a letter, we seem
-      // to have a plural, we should still lowercase the character
-      // we're on.
-      if (!clang::isLetter(string[i+1]) ||
+      // to have a plural, or we're at the beginning, we should still
+      // lowercase the character we're on.
+      if (i == 0 || !clang::isLetter(string[i+1]) ||
           isPluralSuffix(camel_case::getFirstWord(string.substr(i+1)))) {
         scratchStr.push_back(clang::toLowercase(string[i]));
         ++i;
@@ -883,6 +884,10 @@ camel_case::toLowercaseInitialisms(StringRef string,
 /// splitting.
 static bool wordConflictsBeforePreposition(StringRef word,
                                            StringRef preposition) {
+  if (camel_case::sameWordIgnoreFirstCase(preposition, "in") &&
+      camel_case::sameWordIgnoreFirstCase(word, "plug"))
+    return true;
+
   return false;
 }
 
@@ -948,6 +953,16 @@ static bool priorWordExtendsPreposition(StringRef preceding,
       camel_case::sameWordIgnoreFirstCase(preposition, "to"))
     return true;
 
+  // bound by
+  if (camel_case::sameWordIgnoreFirstCase(preceding, "bound") &&
+      camel_case::sameWordIgnoreFirstCase(preposition, "by"))
+    return true;
+
+  // separated by
+  if (camel_case::sameWordIgnoreFirstCase(preceding, "separated") &&
+      camel_case::sameWordIgnoreFirstCase(preposition, "by"))
+    return true;
+
   return false;
 }
 
@@ -980,7 +995,7 @@ static bool isVacuousPreposition(StringRef beforePreposition,
 
 namespace {
   typedef std::reverse_iterator<camel_case::WordIterator> ReverseWordIterator;
-}
+} // end anonymous namespace
 
 /// Find the last preposition in the given word.
 static ReverseWordIterator findLastPreposition(ReverseWordIterator first,
@@ -1083,7 +1098,7 @@ static bool splitBaseNameAfterLastPreposition(
   {
     auto newWords = camel_case::getWords(newBaseName);
     auto newWordsIter = newWords.begin();
-    bool isKeyword = ::isKeyword(*newWordsIter);
+    bool isKeyword = !canBeMemberName(*newWordsIter);
     bool isVacuous = isVacuousName(*newWordsIter);
     if (isKeyword || isVacuous) {
       // Just one word?
@@ -1209,6 +1224,19 @@ bool swift::omitNeedlessWords(StringRef &baseName,
     return lowercaseAcronymsForReturn();
   }
 
+  if (camel_case::getFirstWord(baseName) == "set") {
+    StringRef newBaseName = ::omitNeedlessWords(
+                              baseName,
+                              contextType,
+                              NameRole::Property,
+                              allPropertyNames,
+                              scratch);
+    if (newBaseName != baseName) {
+      baseName = newBaseName;
+      anyChanges = true;
+    }
+  }
+
   // If needed, split the base name.
   if (!argNames.empty() &&
       splitBaseName(baseName, argNames[0], paramTypes[0], firstParamName))
@@ -1224,6 +1252,7 @@ bool swift::omitNeedlessWords(StringRef &baseName,
     NameRole role = i > 0 ? NameRole::SubsequentParameter
       : argNames[0].empty() ? NameRole::BaseName
       : baseName == "init" ? NameRole::SubsequentParameter
+      : paramTypes[0].hasDefaultArgument() ? NameRole::SubsequentParameter
       : NameRole::FirstParameter;
 
     // Omit needless words from the name.

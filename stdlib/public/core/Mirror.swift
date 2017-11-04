@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 // FIXME: ExistentialCollection needs to be supported before this will work
@@ -21,6 +21,7 @@
 /// property that suggests how this structure might be rendered.
 ///
 /// Mirrors are used by playgrounds and the debugger.
+@_fixed_layout // FIXME(sil-serialize-all)
 public struct Mirror {
   /// Representation of descendant classes that don't override
   /// `customMirror`.
@@ -28,6 +29,7 @@ public struct Mirror {
   /// Note that the effect of this setting goes no deeper than the
   /// nearest descendant class that overrides `customMirror`, which
   /// in turn can determine representation of *its* descendants.
+  @_versioned // FIXME(sil-serialize-all)
   internal enum _DefaultDescendantRepresentation {
     /// Generate a default mirror for descendant classes that don't
     /// override `customMirror`.
@@ -94,13 +96,14 @@ public struct Mirror {
   ///   subsequent mutations of `subject` will not observable in
   ///   `Mirror`.  In general, though, the observability of such
   /// mutations is unspecified.
+  @_inlineable // FIXME(sil-serialize-all)
   public init(reflecting subject: Any) {
     if case let customized as CustomReflectable = subject {
       self = customized.customMirror
     } else {
       self = Mirror(
         legacy: _reflect(subject),
-        subjectType: subject.dynamicType)
+        subjectType: type(of: subject))
     }
   }
 
@@ -120,33 +123,39 @@ public struct Mirror {
   /// might write:
   ///
   ///     if let b = AnyBidirectionalCollection(someMirror.children) {
-  ///       for i in b.endIndex.advanced(by: -20, limit: b.startIndex)..<b.endIndex {
+  ///       var i = xs.index(b.endIndex, offsetBy: -20,
+  ///         limitedBy: b.startIndex) ?? b.startIndex
+  ///       while i != xs.endIndex {
   ///          print(b[i])
+  ///          b.formIndex(after: &i)
   ///       }
   ///     }
-  public typealias Children = AnyForwardCollection<Child>
+  public typealias Children = AnyCollection<Child>
 
-  /// A suggestion of how a `Mirror`'s is to be interpreted.
+  /// A suggestion of how a `Mirror`'s `subject` is to be interpreted.
   ///
   /// Playgrounds and the debugger will show a representation similar
   /// to the one used for instances of the kind indicated by the
   /// `DisplayStyle` case name when the `Mirror` is used for display.
+  @_fixed_layout // FIXME(sil-serialize-all)
   public enum DisplayStyle {
     case `struct`, `class`, `enum`, tuple, optional, collection
     case dictionary, `set`
   }
 
-  @warn_unused_result
-  static func _noSuperclassMirror() -> Mirror? { return nil }
+  @_inlineable // FIXME(sil-serialize-all)
+  @_versioned // FIXME(sil-serialize-all)
+  internal static func _noSuperclassMirror() -> Mirror? { return nil }
 
   /// Returns the legacy mirror representing the part of `subject`
   /// corresponding to the superclass of `staticSubclass`.
-  @warn_unused_result
+  @_inlineable // FIXME(sil-serialize-all)
+  @_versioned // FIXME(sil-serialize-all)
   internal static func _legacyMirror(
     _ subject: AnyObject, asClass targetSuperclass: AnyClass) -> _Mirror? {
     
     // get a legacy mirror and the most-derived type
-    var cls: AnyClass = subject.dynamicType
+    var cls: AnyClass = type(of: subject)
     var clsMirror = _reflect(subject)
 
     // Walk up the chain of mirrors/classes until we find staticSubclass
@@ -160,26 +169,29 @@ public struct Mirror {
     }
     return nil
   }
-  
-  @warn_unused_result
-  internal static func _superclassIterator<Subject : Any>(
+
+  @_semantics("optimize.sil.specialize.generic.never")
+  @inline(never)
+  @_inlineable // FIXME(sil-serialize-all)
+  @_versioned
+  internal static func _superclassIterator<Subject>(
     _ subject: Subject, _ ancestorRepresentation: AncestorRepresentation
   ) -> () -> Mirror? {
 
-    if let subject = subject as? AnyObject,
-      let subjectClass = Subject.self as? AnyClass,
-      let superclass = _getSuperclass(subjectClass) {
+    if let subjectClass = Subject.self as? AnyClass,
+       let superclass = _getSuperclass(subjectClass) {
 
       switch ancestorRepresentation {
       case .generated:
         return {
-          self._legacyMirror(subject, asClass: superclass).map {
+          self._legacyMirror(_unsafeDowncastToAnyObject(fromAny: subject), asClass: superclass).map {
             Mirror(legacy: $0, subjectType: superclass)
           }
         }
       case .customized(let makeAncestor):
         return {
-          Mirror(subject, subjectClass: superclass, ancestor: makeAncestor())
+          Mirror(_unsafeDowncastToAnyObject(fromAny: subject), subjectClass: superclass,
+                 ancestor: makeAncestor())
         }
       case .suppressed:
         break
@@ -208,14 +220,15 @@ public struct Mirror {
   /// `Mirror`'s `children` may be upgraded later.  See the failable
   /// initializers of `AnyBidirectionalCollection` and
   /// `AnyRandomAccessCollection` for details.
-  public init<
-    Subject, C : Collection where C.Iterator.Element == Child
-  >(
+  @_inlineable // FIXME(sil-serialize-all)
+  public init<Subject, C : Collection>(
     _ subject: Subject,
     children: C,
     displayStyle: DisplayStyle? = nil,
     ancestorRepresentation: AncestorRepresentation = .generated
-  ) {
+  ) where C.Element == Child 
+  {
+
     self.subjectType = Subject.self
     self._makeSuperclassMirror = Mirror._superclassIterator(
       subject, ancestorRepresentation)
@@ -256,21 +269,23 @@ public struct Mirror {
   /// `Mirror`'s `children` may be upgraded later.  See the failable
   /// initializers of `AnyBidirectionalCollection` and
   /// `AnyRandomAccessCollection` for details.
-  public init<
-    Subject, C: Collection
-  >(
+  @_inlineable // FIXME(sil-serialize-all)
+  public init<Subject, C : Collection>(
     _ subject: Subject,
     unlabeledChildren: C,
     displayStyle: DisplayStyle? = nil,
     ancestorRepresentation: AncestorRepresentation = .generated
-  ) {
+  ) 
+  {
+
     self.subjectType = Subject.self
     self._makeSuperclassMirror = Mirror._superclassIterator(
       subject, ancestorRepresentation)
       
-    self.children = Children(
+    let lazyChildren =
       unlabeledChildren.lazy.map { Child(label: nil, value: $0) }
-    )
+    self.children = Children(lazyChildren)
+
     self.displayStyle = displayStyle
     self._defaultDescendantRepresentation
       = subject is CustomLeafReflectable ? .suppressed : .generated
@@ -299,6 +314,7 @@ public struct Mirror {
   ///   `AnyRandomAccessCollection` later.  See the failable
   ///   initializers of `AnyBidirectionalCollection` and
   /// `AnyRandomAccessCollection` for details.
+  @_inlineable // FIXME(sil-serialize-all)
   public init<Subject>(
     _ subject: Subject,
     children: DictionaryLiteral<String, Any>,
@@ -330,30 +346,33 @@ public struct Mirror {
   /// Suggests a display style for the reflected subject.
   public let displayStyle: DisplayStyle?
 
+  @_inlineable // FIXME(sil-serialize-all)
   public var superclassMirror: Mirror? {
     return _makeSuperclassMirror()
   }
 
+  @_versioned // FIXME(sil-serialize-all)
   internal let _makeSuperclassMirror: () -> Mirror?
+  @_versioned // FIXME(sil-serialize-all)
   internal let _defaultDescendantRepresentation: _DefaultDescendantRepresentation
 }
 
-/// A type that explicitly supplies its own Mirror.
+/// A type that explicitly supplies its own mirror.
 ///
-/// Instances of any type can be `Mirror(reflect:)`'ed upon, but if you are
-/// not satisfied with the `Mirror` supplied for your type by default,
-/// you can make it conform to `CustomReflectable` and return a custom
-/// `Mirror`.
+/// You can create a mirror for any type using the `Mirror(reflect:)`
+/// initializer, but if you are not satisfied with the mirror supplied for
+/// your type by default, you can make it conform to `CustomReflectable` and
+/// return a custom `Mirror` instance.
 public protocol CustomReflectable {
-  /// The `Mirror` for `self`.
+  /// The custom mirror for this instance.
   ///
-  /// - Note: If `Self` has value semantics, the `Mirror` should be
-  ///   unaffected by subsequent mutations of `self`.
+  /// If this type has value semantics, the mirror should be unaffected by
+  /// subsequent mutations of the instance.
   var customMirror: Mirror { get }
 }
 
-/// A type that explicitly supplies its own Mirror but whose
-/// descendant classes are not represented in the Mirror unless they
+/// A type that explicitly supplies its own mirror, but whose
+/// descendant classes are not represented in the mirror unless they
 /// also override `customMirror`.
 public protocol CustomLeafReflectable : CustomReflectable {}
 
@@ -364,15 +383,26 @@ public protocol CustomLeafReflectable : CustomReflectable {}
 ///
 /// Do not declare new conformances to this protocol; they will not
 /// work as expected.
+// FIXME(ABI)#49 (Sealed Protocols): this protocol should be "non-open" and you shouldn't be able to
+// create conformances.
 public protocol MirrorPath {}
-extension IntMax : MirrorPath {}
 extension Int : MirrorPath {}
 extension String : MirrorPath {}
 
 extension Mirror {
+  @_fixed_layout // FIXME(sil-serialize-all)
+  @_versioned // FIXME(sil-serialize-all)
   internal struct _Dummy : CustomReflectable {
-    var mirror: Mirror
-    var customMirror: Mirror { return mirror }
+    @_inlineable // FIXME(sil-serialize-all)
+    @_versioned // FIXME(sil-serialize-all)
+    internal init(mirror: Mirror) {
+      self.mirror = mirror
+    }
+    @_versioned // FIXME(sil-serialize-all)
+    internal var mirror: Mirror
+    @_inlineable // FIXME(sil-serialize-all)
+    @_versioned // FIXME(sil-serialize-all)
+    internal var customMirror: Mirror { return mirror }
   }
 
   /// Return a specific descendant of the reflected subject, or `nil`
@@ -382,25 +412,27 @@ extension Mirror {
   /// A `String` argument selects the first `Child` with a matching label.
   /// An integer argument *n* select the *n*th `Child`.  For example:
   ///
-  ///   var d = Mirror(reflecting: x).descendant(1, "two", 3)
+  ///     var d = Mirror(reflecting: x).descendant(1, "two", 3)
   ///
   /// is equivalent to:
   ///
   ///     var d = nil
   ///     let children = Mirror(reflecting: x).children
-  ///     let p0 = children.startIndex.advanced(by: 1, limit: children.endIndex)
-  ///     if p0 != children.endIndex {
+  ///     if let p0 = children.index(children.startIndex,
+  ///       offsetBy: 1, limitedBy: children.endIndex) {
   ///       let grandChildren = Mirror(reflecting: children[p0].value).children
   ///       SeekTwo: for g in grandChildren {
   ///         if g.label == "two" {
   ///           let greatGrandChildren = Mirror(reflecting: g.value).children
-  ///           let p1 = greatGrandChildren.startIndex.advanced(
-  ///             by: 3,
-  ///             limit: greatGrandChildren.endIndex)
-  ///           if p1 != endIndex { d = greatGrandChildren[p1].value }
+  ///           if let p1 = greatGrandChildren.index(
+  ///             greatGrandChildren.startIndex,
+  ///             offsetBy: 3, limitedBy: greatGrandChildren.endIndex) {
+  ///             d = greatGrandChildren[p1].value
+  ///           }
   ///           break SeekTwo
   ///         }
   ///       }
+  ///     }
   ///
   /// As you can see, complexity for each element of the argument list
   /// depends on the argument type and capabilities of the collection
@@ -409,7 +441,7 @@ extension Mirror {
   /// this function is suitable for exploring the structure of a
   /// `Mirror` in a REPL or playground, but don't expect it to be
   /// efficient.
-  @warn_unused_result
+  @_inlineable // FIXME(sil-serialize-all)
   public func descendant(
     _ first: MirrorPath, _ rest: MirrorPath...
   ) -> Any? {
@@ -420,9 +452,10 @@ extension Mirror {
       if case let label as String = e {
         position = children.index { $0.label == label } ?? children.endIndex
       }
-      else if let offset = (e as? Int).map({ IntMax($0) }) ?? (e as? IntMax) {
-        position = children.startIndex.advanced(
-          by: offset, limit: children.endIndex)
+      else if let offset = (e as? Int).map({ Int64($0) }) ?? (e as? Int64) {
+        position = children.index(children.startIndex,
+          offsetBy: offset,
+          limitedBy: children.endIndex) ?? children.endIndex
       }
       else {
         _preconditionFailure(
@@ -438,6 +471,8 @@ extension Mirror {
 //===--- Legacy _Mirror Support -------------------------------------------===//
 extension Mirror.DisplayStyle {
   /// Construct from a legacy `_MirrorDisposition`
+  @_inlineable // FIXME(sil-serialize-all)
+  @_versioned // FIXME(sil-serialize-all)
   internal init?(legacy: _MirrorDisposition) {
     switch legacy {
     case .`struct`: self = .`struct`
@@ -455,7 +490,8 @@ extension Mirror.DisplayStyle {
   }
 }
 
-@warn_unused_result
+@_inlineable // FIXME(sil-serialize-all)
+@_versioned // FIXME(sil-serialize-all)
 internal func _isClassSuperMirror(_ t: Any.Type) -> Bool {
 #if  _runtime(_ObjC)
   return t == _ClassSuperMirror.self || t == _ObjCSuperMirror.self
@@ -465,11 +501,12 @@ internal func _isClassSuperMirror(_ t: Any.Type) -> Bool {
 }
 
 extension _Mirror {
-  @warn_unused_result
+  @_inlineable // FIXME(sil-serialize-all)
+  @_versioned // FIXME(sil-serialize-all)
   internal func _superMirror() -> _Mirror? {
     if self.count > 0 {
       let childMirror = self[0].1
-      if _isClassSuperMirror(childMirror.dynamicType) {
+      if _isClassSuperMirror(type(of: childMirror)) {
         return childMirror
       }
     }
@@ -490,22 +527,35 @@ internal extension Mirror {
   /// appropriate for random access!  To avoid this pitfall, convert
   /// mirrors to use the new style, which only present forward
   /// traversal in general.
-  internal struct LegacyChildren : Collection {
-    init(_ oldMirror: _Mirror) {
+  @_fixed_layout // FIXME(sil-serialize-all)
+  @_versioned // FIXME(sil-serialize-all)
+  internal struct LegacyChildren : RandomAccessCollection {
+    internal typealias Indices = CountableRange<Int>
+    
+    @_inlineable // FIXME(sil-serialize-all)
+    @_versioned // FIXME(sil-serialize-all)
+    internal init(_ oldMirror: _Mirror) {
       self._oldMirror = oldMirror
     }
 
-    var startIndex: Int {
+    @_inlineable // FIXME(sil-serialize-all)
+    @_versioned // FIXME(sil-serialize-all)
+    internal var startIndex: Int {
       return _oldMirror._superMirror() == nil ? 0 : 1
     }
 
-    var endIndex: Int { return _oldMirror.count }
+    @_inlineable // FIXME(sil-serialize-all)
+    @_versioned // FIXME(sil-serialize-all)
+    internal var endIndex: Int { return _oldMirror.count }
 
-    subscript(position: Int) -> Child {
+    @_inlineable // FIXME(sil-serialize-all)
+    @_versioned // FIXME(sil-serialize-all)
+    internal subscript(position: Int) -> Child {
       let (label, childMirror) = _oldMirror[position]
       return (label: label, value: childMirror.value)
     }
 
+    @_versioned // FIXME(sil-serialize-all)
     internal let _oldMirror: _Mirror
   }
 
@@ -516,6 +566,8 @@ internal extension Mirror {
   ///
   /// - parameter legacy: Either `nil`, or a legacy mirror for `subject`
   ///    as `subjectClass`.
+  @_inlineable // FIXME(sil-serialize-all)
+  @_versioned // FIXME(sil-serialize-all)
   internal init(
     _ subject: AnyObject,
     subjectClass: AnyClass,
@@ -545,6 +597,8 @@ internal extension Mirror {
     }
   }
 
+  @_inlineable // FIXME(sil-serialize-all)
+  @_versioned // FIXME(sil-serialize-all)
   internal init(
     legacy legacyMirror: _Mirror,
     subjectType: Any.Type,
@@ -571,7 +625,8 @@ internal extension Mirror {
 
 //===--- QuickLooks -------------------------------------------------------===//
 
-/// The sum of types that can be used as a quick look representation.
+/// The sum of types that can be used as a Quick Look representation.
+@_fixed_layout // FIXME(sil-serialize-all)
 public enum PlaygroundQuickLook {
   /// Plain text.
   case text(String)
@@ -655,10 +710,14 @@ extension PlaygroundQuickLook {
   /// - Note: If the dynamic type of `subject` has value semantics,
   ///   subsequent mutations of `subject` will not observable in
   ///   `Mirror`.  In general, though, the observability of such
-  /// mutations is unspecified.
+  ///   mutations is unspecified.
+  @_inlineable // FIXME(sil-serialize-all)
   public init(reflecting subject: Any) {
     if let customized = subject as? CustomPlaygroundQuickLookable {
       self = customized.customPlaygroundQuickLook
+    }
+    else if let customized = subject as? _DefaultCustomPlaygroundQuickLookable {
+      self = customized._defaultCustomPlaygroundQuickLook
     }
     else {
       if let q = _reflect(subject).quickLookObject {
@@ -671,117 +730,236 @@ extension PlaygroundQuickLook {
   }
 }
 
-/// A type that explicitly supplies its own PlaygroundQuickLook.
+/// A type that explicitly supplies its own playground Quick Look.
 ///
-/// Instances of any type can be `PlaygroundQuickLook(reflect:)`'ed
-/// upon, but if you are not satisfied with the `PlaygroundQuickLook`
-/// supplied for your type by default, you can make it conform to
-/// `CustomPlaygroundQuickLookable` and return a custom
-/// `PlaygroundQuickLook`.
+/// A Quick Look can be created for an instance of any type by using the
+/// `PlaygroundQuickLook(reflecting:)` initializer. If you are not satisfied
+/// with the representation supplied for your type by default, you can make it
+/// conform to the `CustomPlaygroundQuickLookable` protocol and provide a
+/// custom `PlaygroundQuickLook` instance.
 public protocol CustomPlaygroundQuickLookable {
-  /// The `PlaygroundQuickLook` for `self`.
+  /// A custom playground Quick Look for this instance.
   ///
-  /// - Note: If `Self` has value semantics, the `PlaygroundQuickLook`
-  ///   should be unaffected by subsequent mutations of `self`.
+  /// If this type has value semantics, the `PlaygroundQuickLook` instance
+  /// should be unaffected by subsequent mutations.
   var customPlaygroundQuickLook: PlaygroundQuickLook { get }
+}
+
+
+// A workaround for <rdar://problem/26182650>
+// FIXME(ABI)#50 (Dynamic Dispatch for Class Extensions) though not if it moves out of stdlib.
+public protocol _DefaultCustomPlaygroundQuickLookable {
+  var _defaultCustomPlaygroundQuickLook: PlaygroundQuickLook { get }
 }
 
 //===--- General Utilities ------------------------------------------------===//
 // This component could stand alone, but is used in Mirror's public interface.
 
-/// Represent the ability to pass a dictionary literal in function
-/// signatures.
+/// A lightweight collection of key-value pairs.
 ///
-/// A function with a `DictionaryLiteral` parameter can be passed a
-/// Swift dictionary literal without causing a `Dictionary` to be
-/// created.  This capability can be especially important when the
-/// order of elements in the literal is significant.
+/// Use a `DictionaryLiteral` instance when you need an ordered collection of
+/// key-value pairs and don't require the fast key lookup that the
+/// `Dictionary` type provides. Unlike key-value pairs in a true dictionary,
+/// neither the key nor the value of a `DictionaryLiteral` instance must
+/// conform to the `Hashable` protocol.
 ///
-/// For example:
+/// You initialize a `DictionaryLiteral` instance using a Swift dictionary
+/// literal. Besides maintaining the order of the original dictionary literal,
+/// `DictionaryLiteral` also allows duplicates keys. For example:
+///
+///     let recordTimes: DictionaryLiteral = ["Florence Griffith-Joyner": 10.49,
+///                                           "Evelyn Ashford": 10.76,
+///                                           "Evelyn Ashford": 10.79,
+///                                           "Marlies Gohr": 10.81]
+///     print(recordTimes.first!)
+///     // Prints "("Florence Griffith-Joyner", 10.49)"
+///
+/// Some operations that are efficient on a dictionary are slower when using
+/// `DictionaryLiteral`. In particular, to find the value matching a key, you
+/// must search through every element of the collection. The call to
+/// `index(where:)` in the following example must traverse the whole
+/// collection to find the element that matches the predicate:
+///
+///     let runner = "Marlies Gohr"
+///     if let index = recordTimes.index(where: { $0.0 == runner }) {
+///         let time = recordTimes[index].1
+///         print("\(runner) set a 100m record of \(time) seconds.")
+///     } else {
+///         print("\(runner) couldn't be found in the records.")
+///     }
+///     // Prints "Marlies Gohr set a 100m record of 10.81 seconds."
+///
+/// Dictionary Literals as Function Parameters
+/// ------------------------------------------
+///
+/// When calling a function with a `DictionaryLiteral` parameter, you can pass
+/// a Swift dictionary literal without causing a `Dictionary` to be created.
+/// This capability can be especially important when the order of elements in
+/// the literal is significant.
+///
+/// For example, you could create an `IntPairs` structure that holds a list of
+/// two-integer tuples and use an initializer that accepts a
+/// `DictionaryLiteral` instance.
 ///
 ///     struct IntPairs {
-///       var elements: [(Int, Int)]
-///       init(_ pairs: DictionaryLiteral<Int, Int>) {
-///         elements = Array(pairs)
-///       }
+///         var elements: [(Int, Int)]
+///
+///         init(_ elements: DictionaryLiteral<Int, Int>) {
+///             self.elements = Array(elements)
+///         }
 ///     }
 ///
-///     let x = IntPairs([1:2, 1:1, 3:4, 2:1])
-///     print(x.elements)  // [(1, 2), (1, 1), (3, 4), (2, 1)]
-public struct DictionaryLiteral<Key, Value> : DictionaryLiteralConvertible {
-  /// Store `elements`.
+/// When you're ready to create a new `IntPairs` instance, use a dictionary
+/// literal as the parameter to the `IntPairs` initializer. The
+/// `DictionaryLiteral` instance preserves the order of the elements as
+/// passed.
+///
+///     let pairs = IntPairs([1: 2, 1: 1, 3: 4, 2: 1])
+///     print(pairs.elements)
+///     // Prints "[(1, 2), (1, 1), (3, 4), (2, 1)]"
+@_fixed_layout // FIXME(sil-serialize-all)
+public struct DictionaryLiteral<Key, Value> : ExpressibleByDictionaryLiteral {
+  /// Creates a new `DictionaryLiteral` instance from the given dictionary
+  /// literal.
+  ///
+  /// The order of the key-value pairs is kept intact in the resulting
+  /// `DictionaryLiteral` instance.
+  @_inlineable // FIXME(sil-serialize-all)
   public init(dictionaryLiteral elements: (Key, Value)...) {
     self._elements = elements
   }
+  @_versioned // FIXME(sil-serialize-all)
   internal let _elements: [(Key, Value)]
 }
 
 /// `Collection` conformance that allows `DictionaryLiteral` to
 /// interoperate with the rest of the standard library.
-extension DictionaryLiteral : Collection {
-  /// The position of the first element in a non-empty `DictionaryLiteral`.
+extension DictionaryLiteral : RandomAccessCollection {
+  public typealias Indices = CountableRange<Int>
+  
+  /// The position of the first element in a nonempty collection.
   ///
-  /// Identical to `endIndex` in an empty `DictionaryLiteral`.
-  ///
-  /// - Complexity: O(1).
+  /// If the `DictionaryLiteral` instance is empty, `startIndex` is equal to
+  /// `endIndex`.
+  @_inlineable // FIXME(sil-serialize-all)
   public var startIndex: Int { return 0 }
 
-  /// The `DictionaryLiteral`'s "past the end" position.
+  /// The collection's "past the end" position---that is, the position one
+  /// greater than the last valid subscript argument.
   ///
-  /// `endIndex` is not a valid argument to `subscript`, and is always
-  /// reachable from `startIndex` by zero or more applications of
-  /// `successor()`.
-  ///
-  /// - Complexity: O(1).
+  /// If the `DictionaryLiteral` instance is empty, `endIndex` is equal to
+  /// `startIndex`.
+  @_inlineable // FIXME(sil-serialize-all)
   public var endIndex: Int { return _elements.endIndex }
 
-  // FIXME: a typealias is needed to prevent <rdar://20248032>
+  // FIXME(ABI)#174 (Type checker): a typealias is needed to prevent <rdar://20248032>
+  /// The element type of a `DictionaryLiteral`: a tuple containing an
+  /// individual key-value pair.
   public typealias Element = (key: Key, value: Value)
 
-  /// Access the element indicated by `position`.
+  /// Accesses the element at the specified position.
   ///
-  /// - Precondition: `position >= 0 && position < endIndex`.
-  ///
-  /// - complexity: O(1).
+  /// - Parameter position: The position of the element to access. `position`
+  ///   must be a valid index of the collection that is not equal to the
+  ///   `endIndex` property.
+  /// - Returns: The key-value pair at position `position`.
+  @_inlineable // FIXME(sil-serialize-all)
   public subscript(position: Int) -> Element {
     return _elements[position]
   }
 }
 
 extension String {
-  /// Initialize `self` with the textual representation of `instance`.
+  /// Creates a string representing the given value.
   ///
-  /// * If `Subject` conforms to `Streamable`, the result is obtained by
-  ///   calling `instance.write(to: s)` on an empty string `s`.
-  /// * Otherwise, if `Subject` conforms to `CustomStringConvertible`, the
-  ///   result is `instance`'s `description`
-  /// * Otherwise, if `Subject` conforms to `CustomDebugStringConvertible`,
-  ///   the result is `instance`'s `debugDescription`
-  /// * Otherwise, an unspecified result is supplied automatically by
-  ///   the Swift standard library.
+  /// Use this initializer to convert an instance of any type to its preferred
+  /// representation as a `String` instance. The initializer creates the
+  /// string representation of `instance` in one of the following ways,
+  /// depending on its protocol conformance:
   ///
-  /// - SeeAlso: `String.init<Subject>(reflecting: Subject)`
-  public init<Subject>(_ instance: Subject) {
+  /// - If `instance` conforms to the `TextOutputStreamable` protocol, the
+  ///   result is obtained by calling `instance.write(to: s)` on an empty
+  ///   string `s`.
+  /// - If `instance` conforms to the `CustomStringConvertible` protocol, the
+  ///   result is `instance.description`.
+  /// - If `instance` conforms to the `CustomDebugStringConvertible` protocol,
+  ///   the result is `instance.debugDescription`.
+  /// - An unspecified result is supplied automatically by the Swift standard
+  ///   library.
+  ///
+  /// For example, this custom `Point` struct uses the default representation
+  /// supplied by the standard library.
+  ///
+  ///     struct Point {
+  ///         let x: Int, y: Int
+  ///     }
+  ///
+  ///     let p = Point(x: 21, y: 30)
+  ///     print(String(describing: p))
+  ///     // Prints "Point(x: 21, y: 30)"
+  ///
+  /// After adding `CustomStringConvertible` conformance by implementing the
+  /// `description` property, `Point` provides its own custom representation.
+  ///
+  ///     extension Point: CustomStringConvertible {
+  ///         var description: String {
+  ///             return "(\(x), \(y))"
+  ///         }
+  ///     }
+  ///
+  ///     print(String(describing: p))
+  ///     // Prints "(21, 30)"
+  @_inlineable // FIXME(sil-serialize-all)
+  public init<Subject>(describing instance: Subject) {
     self.init()
     _print_unlocked(instance, &self)
   }
 
-  /// Initialize `self` with a detailed textual representation of
-  /// `subject`, suitable for debugging.
+  /// Creates a string with a detailed representation of the given value,
+  /// suitable for debugging.
   ///
-  /// * If `Subject` conforms to `CustomDebugStringConvertible`, the result
-  ///   is `subject`'s `debugDescription`.
+  /// Use this initializer to convert an instance of any type to its custom
+  /// debugging representation. The initializer creates the string
+  /// representation of `instance` in one of the following ways, depending on
+  /// its protocol conformance:
   ///
-  /// * Otherwise, if `Subject` conforms to `CustomStringConvertible`,
-  ///   the result is `subject`'s `description`.
+  /// - If `subject` conforms to the `CustomDebugStringConvertible` protocol,
+  ///   the result is `subject.debugDescription`.
+  /// - If `subject` conforms to the `CustomStringConvertible` protocol, the
+  ///   result is `subject.description`.
+  /// - If `subject` conforms to the `TextOutputStreamable` protocol, the
+  ///   result is obtained by calling `subject.write(to: s)` on an empty
+  ///   string `s`.
+  /// - An unspecified result is supplied automatically by the Swift standard
+  ///   library.
   ///
-  /// * Otherwise, if `Subject` conforms to `Streamable`, the result is
-  ///   obtained by calling `subject.write(to: s)` on an empty string `s`.
+  /// For example, this custom `Point` struct uses the default representation
+  /// supplied by the standard library.
   ///
-  /// * Otherwise, an unspecified result is supplied automatically by
-  ///   the Swift standard library.
+  ///     struct Point {
+  ///         let x: Int, y: Int
+  ///     }
   ///
-  /// - SeeAlso: `String.init<Subject>(Subject)`
+  ///     let p = Point(x: 21, y: 30)
+  ///     print(String(reflecting: p))
+  ///     // Prints "p: Point = {
+  ///     //           x = 21
+  ///     //           y = 30
+  ///     //         }"
+  ///
+  /// After adding `CustomDebugStringConvertible` conformance by implementing
+  /// the `debugDescription` property, `Point` provides its own custom
+  /// debugging representation.
+  ///
+  ///     extension Point: CustomDebugStringConvertible {
+  ///         var debugDescription: String {
+  ///             return "Point(x: \(x), y: \(y))"
+  ///         }
+  ///     }
+  ///
+  ///     print(String(reflecting: p))
+  ///     // Prints "Point(x: 21, y: 30)"
+  @_inlineable // FIXME(sil-serialize-all)
   public init<Subject>(reflecting subject: Subject) {
     self.init()
     _debugPrint_unlocked(subject, &self)
@@ -790,16 +968,15 @@ extension String {
 
 /// Reflection for `Mirror` itself.
 extension Mirror : CustomStringConvertible {
+  @_inlineable // FIXME(sil-serialize-all)
   public var description: String {
     return "Mirror for \(self.subjectType)"
   }
 }
 
 extension Mirror : CustomReflectable {
+  @_inlineable // FIXME(sil-serialize-all)
   public var customMirror: Mirror {
     return Mirror(self, children: [:])
   }
 }
-
-@available(*, unavailable, renamed: "MirrorPath")
-public typealias MirrorPathType = MirrorPath

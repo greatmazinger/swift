@@ -1,6 +1,5 @@
-// RUN: rm -rf %t
-// RUN: mkdir -p %t
-// RUN: %target-build-swift %s -Xfrontend -disable-access-control -o %t/Assert_Debug
+// RUN: %empty-directory(%t)
+// RUN: %target-build-swift %s -Xfrontend -disable-access-control -o %t/Assert_Debug -Onone
 // RUN: %target-build-swift %s -Xfrontend -disable-access-control -o %t/Assert_Release -O
 // RUN: %target-build-swift %s -Xfrontend -disable-access-control -o %t/Assert_Unchecked -Ounchecked
 //
@@ -19,7 +18,7 @@ import StdlibUnittest
 
 func testTrapsAreNoreturn(i: Int) -> Int {
   // Don't need a return statement in 'case' statements because these functions
-  // are @noreturn.
+  // never return.
   switch i {
   case 2:
     preconditionFailure("cannot happen")
@@ -145,6 +144,10 @@ Assert.test("fatalError/StringInterpolation")
   expectCrashLater()
   fatalError("this \(should) fail")
 }
+
+// FIXME: swift-3-indexing-model: add tests for fatalError() that use non-ASCII
+// characters, and that use NSString-backed String.
+// We had to rewrite a part of fatalError() in the indexing effort.
 
 Assert.test("_precondition")
   .xfail(.custom(

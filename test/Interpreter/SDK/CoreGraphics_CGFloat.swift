@@ -2,6 +2,7 @@
 // REQUIRES: executable_test
 
 // REQUIRES: objc_interop
+// REQUIRES: rdar30317033
 
 import CoreGraphics
 import Foundation
@@ -21,6 +22,7 @@ CGFloatTestSuite.test("init") {
   expectEqual(0.0, CGFloat())
   expectEqual(4.125, CGFloat(Float(4.125)))
   expectEqual(4.125, CGFloat(Double(4.125)))
+  expectEqual(4.125, CGFloat(CGFloat(Double(4.125))))
 
   expectEqual(42, CGFloat(Int(42)))
   expectEqual(42, CGFloat(Int8(42)))
@@ -53,37 +55,12 @@ CGFloatTestSuite.test("initOtherTypesFromCGFloat") {
 }
 
 CGFloatTestSuite.test("comparisons") {
-  let x = 3.14
-  let y = 3.14
-  let z = 2.71
+  let instances: [CGFloat] = [ 2.71, 3.14 ]
 
-  expectTrue(x == y)
-  expectFalse(x != y)
-  checkHashable(true, x, y)
+  checkHashable(instances, equalityOracle: { $0 == $1 })
 
-  expectFalse(x == z)
-  expectTrue(x != z)
-  checkHashable(false, x, z)
-
-  expectFalse(x < z)
-  expectFalse(x <= z)
-  expectTrue(x >= z)
-  expectTrue(x > z)
-  checkComparable(.gt, x, z)
-
-  expectTrue(z < x)
-  expectTrue(z <= x)
-  expectFalse(z >= x)
-  expectFalse(z > x)
-  checkComparable(.lt, z, x)
-
-  expectFalse(x < y)
-  expectTrue(x <= y)
-  expectTrue(x >= y)
-  expectFalse(x > y)
-  checkComparable(.eq, x, y)
+  checkComparable(instances, oracle: { $0 <=> $1 })
 }
-
 
 CGFloatTestSuite.test("arithmetic") {
   let x: CGFloat = 0.25
@@ -97,8 +74,6 @@ CGFloatTestSuite.test("arithmetic") {
   expectEqual(1.0, x * y)
 
   expectEqual(0.0625, x / y)
-
-  expectEqual(0.25, x % z)
 }
 
 CGFloatTestSuite.test("striding") {

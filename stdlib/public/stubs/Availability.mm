@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 //
@@ -14,9 +14,14 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "swift/Runtime/Config.h"
+
+#if SWIFT_OBJC_INTEROP
+#include "swift/Basic/Lazy.h"
 #include "swift/Runtime/Debug.h"
 #import <Foundation/Foundation.h>
 #include <TargetConditionals.h>
+#include "../SwiftShims/FoundationShims.h"
 
 using namespace swift;
 
@@ -72,21 +77,24 @@ static NSOperatingSystemVersion operatingSystemVersionFromPlist() {
   return versionStruct;
 }
 
+static NSOperatingSystemVersion getOSVersion() {
+  // Use -[NSProcessInfo.operatingSystemVersion] when present
+  // (on iOS 8 and OS X 10.10 and above).
+  if ([NSProcessInfo
+       instancesRespondToSelector:@selector(operatingSystemVersion)]) {
+    return [[NSProcessInfo processInfo] operatingSystemVersion];
+  } else {
+    // Otherwise load and parse from SystemVersion dictionary.
+    return operatingSystemVersionFromPlist();
+  }
+}
+
 /// Return the version of the operating system currently running for use in
 /// API availability queries.
-SWIFT_RUNTIME_STDLIB_INTERFACE
-extern "C" NSOperatingSystemVersion _swift_stdlib_operatingSystemVersion() {
-  static NSOperatingSystemVersion version = ([]{
-    // Use -[NSProcessInfo.operatingSystemVersion] when present
-    // (on iOS 8 and OS X 10.10 and above).
-    if ([NSProcessInfo
-         instancesRespondToSelector:@selector(operatingSystemVersion)]) {
-      return [[NSProcessInfo processInfo] operatingSystemVersion];
-    } else {
-      // Otherwise load and parse from SystemVersion dictionary.
-      return operatingSystemVersionFromPlist();
-    }
-  })();
+_SwiftNSOperatingSystemVersion swift::_swift_stdlib_operatingSystemVersion() {
+  NSOperatingSystemVersion version = SWIFT_LAZY_CONSTANT(getOSVersion());
 
-  return version;
+  return { version.majorVersion, version.minorVersion, version.patchVersion };
 }
+#endif
+

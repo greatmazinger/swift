@@ -98,9 +98,8 @@ protocol Hasher {
   // collections.
   mutating func combineSequence<
     S : Sequence
-    where
-    S.Iterator.Element : NewHashable
   >(_ s: S)
+  where S.Iterator.Element : NewHashable
 
   mutating func combine<H : NewHashable>(_ value: H)
 }
@@ -122,14 +121,13 @@ struct InProcessHashtableHasher : Hasher {
 
   mutating func combine(_ value: Float) {
     // Only for exposition.
-    _state = _state ^ Int(value._toBitPattern())
+    _state = _state ^ Int(value.bitPattern)
   }
 
   mutating func combineSequence<
     S : Sequence
-    where
-    S.Iterator.Element : NewHashable
-  >(_ s: S) {
+  >(_ s: S)
+  where S.Iterator.Element : NewHashable {
     for v in s {
       v.combineIntoHash(&self)
     }

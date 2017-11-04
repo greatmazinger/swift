@@ -1,4 +1,4 @@
-// RUN: %target-run-simple-swift | FileCheck %s
+// RUN: %target-run-simple-swift | %FileCheck %s
 // REQUIRES: executable_test
 
 // Create a new array
@@ -54,10 +54,15 @@ class Canary {
 
 print("")
 
+@inline(never)
+func return_array() -> [Canary] {
+  return [Canary(), Canary(), Canary()]
+}
+
 // CHECK: dead
 // CHECK: dead
 // CHECK: dead
-_ = { [Canary(), Canary(), Canary()] }()
+return_array()
 
 // Create an array of (String, Bool) pairs. <rdar://problem/16916422>
 repeat {
@@ -146,7 +151,7 @@ let afd: [Float] = [
 
 // Check equality on arrays
 func test() {
-  var a = [42]
+  let a = [42]
   print(a == [42])
 }
 test()

@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 //
@@ -19,14 +19,63 @@
 #include "swift/Subsystems.h"
 #include "swift/AST/ASTContext.h"
 #include "swift/AST/Decl.h"
+#include "swift/AST/GenericSignature.h"
 #include "swift/AST/Module.h"
+#include "swift/AST/NameLookup.h"
+#include "swift/AST/SubstitutionMap.h"
 #include "swift/AST/Types.h"
+#include "swift/AST/TypeRepr.h"
+#include "swift/Basic/Mangler.h"
+#include "swift/ClangImporter/ClangImporter.h"
+
+// TODO: Develop a proper interface for this.
+#include "swift/AST/IRGenOptions.h"
+#include "swift/AST/SILOptions.h"
+#include "swift/SIL/SILModule.h"
+#include "../IRGen/IRGenModule.h"
+#include "../IRGen/FixedTypeInfo.h"
+#include "../IRGen/GenClass.h"
+#include "../IRGen/GenStruct.h"
+#include "../IRGen/GenTuple.h"
+#include "../IRGen/MemberAccessStrategy.h"
 
 using namespace swift;
 using namespace swift::remote;
 using namespace swift::remoteAST;
 
+using irgen::Alignment;
+using irgen::Size;
+
+static inline RemoteAddress operator+(RemoteAddress address, Size offset) {
+  return RemoteAddress(address.getAddressData() + offset.getValue());
+}
+
 namespace {
+
+/// A "minimal" class for querying IRGen.
+struct IRGenContext {
+  IRGenOptions IROpts;
+  SILOptions SILOpts;
+  std::unique_ptr<SILModule> SILMod;
+  llvm::LLVMContext LLVMContext;
+  irgen::IRGenerator IRGen;
+  irgen::IRGenModule IGM;
+
+private:
+  IRGenContext(ASTContext &ctx, ModuleDecl *module)
+    : SILMod(SILModule::createEmptyModule(module, SILOpts)),
+      IRGen(IROpts, *SILMod),
+      IGM(IRGen, IRGen.createTargetMachine(), /*SourceFile*/ nullptr,
+          LLVMContext, "<fake module name>", "<fake output filename>") {
+    }
+
+public:
+  static std::unique_ptr<IRGenContext>
+  create(ASTContext &ctx, DeclContext *nominalDC) {
+    auto module = nominalDC->getParentModule();
+    return std::unique_ptr<IRGenContext>(new IRGenContext(ctx, module));
+  }
+};
 
 /// An implementation of MetadataReader's BuilderType concept that
 /// just finds and builds things in the AST.
@@ -37,18 +86,48 @@ class RemoteASTTypeBuilder {
   /// Created lazily.
   DeclContext *NotionalDC = nullptr;
 
+  Optional<Failure> CurFailure;
+
 public:
   using BuiltType = swift::Type;
   using BuiltNominalTypeDecl = swift::NominalTypeDecl*;
   explicit RemoteASTTypeBuilder(ASTContext &ctx) : Ctx(ctx) {}
+
+  std::unique_ptr<IRGenContext> createIRGenContext() {
+    return IRGenContext::create(Ctx, getNotionalDC());
+  }
+
+  template <class Result, class FailureKindTy, class... FailureArgTys>
+  Result fail(FailureKindTy kind, FailureArgTys &&...failureArgs) {
+    if (!CurFailure) {
+      CurFailure.emplace(kind, std::forward<FailureArgTys>(failureArgs)...);
+    }
+    return Result();
+  }
+
+  template <class T, class DefaultFailureKindTy, class... DefaultFailureArgTys>
+  Result<T> getFailureAsResult(DefaultFailureKindTy defaultFailureKind,
+                               DefaultFailureArgTys &&...defaultFailureArgs) {
+    // If we already have a failure, use that.
+    if (CurFailure) {
+      Result<T> result = std::move(*CurFailure);
+      CurFailure.reset();
+      return result;
+    }
+
+    // Otherwise, use the default failure.
+    return Result<T>::emplaceFailure(defaultFailureKind,
+               std::forward<DefaultFailureArgTys>(defaultFailureArgs)...);
+  }
 
   Type createBuiltinType(const std::string &mangledName) {
     // TODO
     return Type();
   }
 
-  NominalTypeDecl *createNominalTypeDecl(std::string &&mangledName) {
-    auto node = Demangle::demangleTypeAsNode(mangledName);
+  NominalTypeDecl *createNominalTypeDecl(StringRef mangledName) {
+    Demangle::Demangler Dem;
+    Demangle::NodePointer node = Dem.demangleType(mangledName);
     if (!node) return nullptr;
 
     return createNominalTypeDecl(node);
@@ -56,9 +135,17 @@ public:
 
   NominalTypeDecl *createNominalTypeDecl(const Demangle::NodePointer &node);
 
+  Type createNominalType(NominalTypeDecl *decl) {
+    // If the declaration is generic, fail.
+    if (decl->isGenericContext())
+      return Type();
+
+    return decl->getDeclaredType();
+  }
+
   Type createNominalType(NominalTypeDecl *decl, Type parent) {
     // If the declaration is generic, fail.
-    if (decl->getGenericSignature())
+    if (decl->getGenericParams())
       return Type();
 
     // Validate the parent type.
@@ -68,10 +155,40 @@ public:
     return NominalType::get(decl, parent, Ctx);
   }
 
+  Type createBoundGenericType(NominalTypeDecl *decl, ArrayRef<Type> args) {
+    // If the declaration isn't generic, fail.
+    if (!decl->isGenericContext())
+      return Type();
+
+    // Build a SubstitutionMap.
+    auto *genericSig = decl->getGenericSignature();
+    auto genericParams = genericSig->getSubstitutableParams();
+    if (genericParams.size() != args.size())
+      return Type();
+
+    auto subMap = genericSig->getSubstitutionMap(
+        [&](SubstitutableType *t) -> Type {
+          for (unsigned i = 0, e = genericParams.size(); i < e; ++i) {
+            if (t->isEqual(genericParams[i]))
+              return args[i];
+          }
+          return Type();
+        },
+        // FIXME: Wrong module
+        LookUpConformanceInModule(decl->getParentModule()));
+
+    auto origType = decl->getDeclaredInterfaceType();
+
+    // FIXME: We're not checking that the type satisfies the generic
+    // requirements of the signature here.
+    auto substType = origType.subst(subMap);
+    return substType;
+  }
+
   Type createBoundGenericType(NominalTypeDecl *decl, ArrayRef<Type> args,
                               Type parent) {
     // If the declaration isn't generic, fail.
-    if (!decl->getGenericSignature())
+    if (!decl->getGenericParams())
       return Type();
 
     // Validate the parent type.
@@ -82,7 +199,8 @@ public:
     TypeReprList genericArgReprs(args);
     GenericIdentTypeRepr genericRepr(SourceLoc(), decl->getName(),
                                      genericArgReprs.getList(), SourceRange());
-    genericRepr.setValue(decl);
+    // FIXME
+    genericRepr.setValue(decl, nullptr);
 
     Type genericType;
 
@@ -105,7 +223,8 @@ public:
           : GenericArgs(type->getGenericArgs()),
             Ident(SourceLoc(), type->getDecl()->getName(),
                   GenericArgs.getList(), SourceRange()) {
-          Ident.setValue(type->getDecl());
+          // FIXME
+          Ident.setValue(type->getDecl(), nullptr);
         }
 
         // SmallVector::emplace_back will never need to call this because
@@ -135,9 +254,12 @@ public:
           auto nominal = p->castTo<NominalType>();
           simpleComponents.emplace_back(SourceLoc(),
                                         nominal->getDecl()->getName());
+          // FIXME
+          simpleComponents.back().setValue(nominal->getDecl(), nullptr);
           componentReprs.push_back(&simpleComponents.back());
         }
       }
+      componentReprs.push_back(&genericRepr);
 
       CompoundIdentTypeRepr compoundRepr(componentReprs);
       genericType = checkTypeRepr(&compoundRepr);
@@ -157,24 +279,29 @@ public:
     return genericType;
   }
 
-  Type createTupleType(ArrayRef<Type> eltTypes, bool isVariadic) {
+  Type createTupleType(ArrayRef<Type> eltTypes, StringRef labels,
+                       bool isVariadic) {
     // Just bail out on variadic tuples for now.
     if (isVariadic) return Type();
 
     SmallVector<TupleTypeElt, 4> elements;
     elements.reserve(eltTypes.size());
     for (auto eltType : eltTypes) {
-      elements.push_back(eltType);
+      Identifier label;
+      if (!labels.empty()) {
+        auto split = labels.split(' ');
+        if (!split.first.empty())
+          label = Ctx.getIdentifier(split.first);
+        labels = split.second;
+      }
+      elements.emplace_back(eltType, label);
     }
 
     return TupleType::get(elements, Ctx);
   }
 
-  Type createFunctionType(ArrayRef<Type> args,
-                          const std::vector<bool> &inOutArgs,
+  Type createFunctionType(ArrayRef<remote::FunctionParam<Type>> params,
                           Type output, FunctionTypeFlags flags) {
-    assert(args.size() == inOutArgs.size());
-
     FunctionTypeRepresentation representation;
     switch (flags.getConvention()) {
     case FunctionMetadataConvention::Swift:
@@ -192,51 +319,54 @@ public:
     }
 
     auto einfo = AnyFunctionType::ExtInfo(representation,
-                                          /*noreturn*/ false,
                                           /*throws*/ flags.throws());
 
     // The result type must be materializable.
     if (!output->isMaterializable()) return Type();
 
-    // All the argument types must be materializable (before inout is applied).
-    for (auto arg : args) {
-      if (!arg->isMaterializable()) return Type();
+    llvm::SmallVector<AnyFunctionType::Param, 8> funcParams;
+    for (const auto &param : params) {
+      auto type = param.getType();
+
+      // All the argument types must be materializable.
+      if (!type->isMaterializable())
+        return Type();
+
+      auto label = Ctx.getIdentifier(param.getLabel());
+      auto flags = param.getFlags();
+      funcParams.push_back(AnyFunctionType::Param(type, label, flags));
     }
 
-    Type input;
-    if (args.size() == 1) {
-      input = args[0];
-    } else {
-      SmallVector<TupleTypeElt, 4> elts;
-      elts.reserve(args.size());
-      for (auto i : indices(args)) {
-        Type arg = args[i];
-        if (inOutArgs[i]) arg = InOutType::get(arg);
-        elts.push_back(arg);
-      }
-    }
-
-    return FunctionType::get(input, output, einfo);
+    return FunctionType::get(funcParams, output, einfo);
   }
 
-  Type createProtocolType(StringRef moduleName, StringRef protocolName) {
+  Type createProtocolType(StringRef mangledName,
+                          StringRef moduleName,
+                          StringRef privateDiscriminator,
+                          StringRef name) {
     auto module = Ctx.getModuleByName(moduleName);
     if (!module) return Type();
 
-    Identifier name = Ctx.getIdentifier(protocolName);
-    auto decl = findNominalTypeDecl(module, name, Identifier(),
+    auto decl = findNominalTypeDecl(module,
+                                    Ctx.getIdentifier(name),
+                                    (privateDiscriminator.empty()
+                                     ? Identifier()
+                                     : Ctx.getIdentifier(privateDiscriminator)),
                                     Demangle::Node::Kind::Protocol);
     if (!decl) return Type();
 
     return decl->getDeclaredType();
   }
 
-  Type createProtocolCompositionType(ArrayRef<Type> protocols) {
-    for (auto protocol : protocols) {
-      if (!protocol->is<ProtocolType>())
+  Type createProtocolCompositionType(ArrayRef<Type> members,
+                                     bool hasExplicitAnyObject) {
+    for (auto member : members) {
+      if (!member->isExistentialType() &&
+          !member->getClassOrBoundGenericClass())
         return Type();
     }
-    return ProtocolCompositionType::get(Ctx, protocols);
+
+    return ProtocolCompositionType::get(Ctx, members, hasExplicitAnyObject);
   }
 
   Type createExistentialMetatypeType(Type instance) {
@@ -245,7 +375,9 @@ public:
     return ExistentialMetatypeType::get(instance);
   }
 
-  Type createMetatypeType(Type instance) {
+  Type createMetatypeType(Type instance, bool wasAbstract=false) {
+    // FIXME: Plumb through metatype representation and generalize silly
+    // 'wasAbstract' flag
     return MetatypeType::get(instance);
   }
 
@@ -257,7 +389,7 @@ public:
     if (!base->isTypeParameter())
       return Type();
     // TODO: look up protocol?
-    return DependentMemberType::get(base, Ctx.getIdentifier(member), Ctx);
+    return DependentMemberType::get(base, Ctx.getIdentifier(member));
   }
 
   Type createUnownedStorageType(Type base) {
@@ -278,8 +410,23 @@ public:
     return WeakStorageType::get(base, Ctx);
   }
 
-  Type getUnnamedObjCClassType() {
-    return Type();
+  Type createSILBoxType(Type base) {
+    return SILBoxType::get(base->getCanonicalType());
+  }
+
+  Type createObjCClassType(StringRef name) {
+    Identifier ident = Ctx.getIdentifier(name);
+    auto typeDecl =
+      findForeignNominalTypeDecl(ident, Demangle::Node::Kind::Class);
+    if (!typeDecl) return Type();
+    return createNominalType(typeDecl, /*parent*/ Type());
+  }
+
+  Type createForeignClassType(StringRef mangledName) {
+    auto typeDecl = createNominalTypeDecl(mangledName);
+    if (!typeDecl) return Type();
+
+    return createNominalType(typeDecl, /*parent*/ Type());
   }
 
   Type getUnnamedForeignClassType() {
@@ -313,21 +460,37 @@ private:
   DeclContext *findDeclContext(const Demangle::NodePointer &node);
   ModuleDecl *findModule(const Demangle::NodePointer &node);
   Demangle::NodePointer findModuleNode(const Demangle::NodePointer &node);
+  bool isForeignModule(const Demangle::NodePointer &node);
 
   NominalTypeDecl *findNominalTypeDecl(DeclContext *dc,
                                        Identifier name,
                                        Identifier privateDiscriminator,
                                        Demangle::Node::Kind kind);
+  NominalTypeDecl *findForeignNominalTypeDecl(Identifier name,
+                                              Demangle::Node::Kind kind);
 
   Type checkTypeRepr(TypeRepr *repr) {
     DeclContext *dc = getNotionalDC();
 
     TypeLoc loc(repr);
-    if (performTypeLocChecking(Ctx, loc, /*SILType*/ false, dc,
-                               /*diagnose*/ false))
+    if (performTypeLocChecking(Ctx, loc, dc, /*diagnose*/ false))
       return Type();
 
     return loc.getType();
+  }
+
+  static NominalTypeDecl *getAcceptableNominalTypeCandidate(ValueDecl *decl, 
+                                                  Demangle::Node::Kind kind) {
+    if (kind == Demangle::Node::Kind::Class) {
+      return dyn_cast<ClassDecl>(decl);
+    } else if (kind == Demangle::Node::Kind::Enum) {
+      return dyn_cast<EnumDecl>(decl);
+    } else if (kind == Demangle::Node::Kind::Protocol) {
+      return dyn_cast<ProtocolDecl>(decl);
+    } else {
+      assert(kind == Demangle::Node::Kind::Structure);
+      return dyn_cast<StructDecl>(decl);
+    }
   }
 
   DeclContext *getNotionalDC() {
@@ -358,12 +521,15 @@ private:
     }
   };
 };
-}
+} // end anonymous namespace
 
 NominalTypeDecl *
 RemoteASTTypeBuilder::createNominalTypeDecl(const Demangle::NodePointer &node) {
   auto DC = findDeclContext(node);
-  if (!DC) return nullptr;
+  if (!DC) {
+    return fail<NominalTypeDecl*>(Failure::CouldNotResolveTypeDecl,
+                                  Demangle::mangleNode(node));
+  }
 
   auto decl = dyn_cast<NominalTypeDecl>(DC);
   if (!decl) return nullptr;
@@ -388,6 +554,16 @@ RemoteASTTypeBuilder::findModuleNode(const Demangle::NodePointer &node) {
     return nullptr;
 
   return findModuleNode(child->getFirstChild());
+}
+
+bool RemoteASTTypeBuilder::isForeignModule(const Demangle::NodePointer &node) {
+  if (node->getKind() == Demangle::Node::Kind::DeclContext)
+    return isForeignModule(node->getFirstChild());
+
+  if (node->getKind() != Demangle::Node::Kind::Module)
+    return false;
+
+  return (node->getText() == "__ObjC");
 }
 
 DeclContext *
@@ -423,9 +599,6 @@ RemoteASTTypeBuilder::findDeclContext(const Demangle::NodePointer &node) {
       return dyn_cast<DeclContext>(decl);
     }
 
-    DeclContext *dc = findDeclContext(node->getChild(0));
-    if (!dc) return nullptr;
-
     Identifier name;
     Identifier privateDiscriminator;
     if (declNameNode->getKind() == Demangle::Node::Kind::Identifier) {
@@ -439,6 +612,17 @@ RemoteASTTypeBuilder::findDeclContext(const Demangle::NodePointer &node) {
     // Ignore any other decl-name productions for now.
     } else {
       return nullptr;
+    }
+
+    DeclContext *dc = findDeclContext(node->getChild(0));
+    if (!dc) {
+      // Do some backup logic for foreign type declarations.
+      if (privateDiscriminator.empty() &&
+          isForeignModule(node->getChild(0))) {
+        return findForeignNominalTypeDecl(name, node->getKind());
+      } else {
+        return nullptr;
+      }
     }
 
     return findNominalTypeDecl(dc, name, privateDiscriminator, node->getKind());
@@ -465,18 +649,9 @@ RemoteASTTypeBuilder::findNominalTypeDecl(DeclContext *dc,
   NominalTypeDecl *result = nullptr;
   for (auto decl : lookupResults) {
     // Ignore results that are not the right kind of nominal type declaration.
-    NominalTypeDecl *candidate;
-    if (kind == Demangle::Node::Kind::Class) {
-      candidate = dyn_cast<ClassDecl>(decl);
-    } else if (kind == Demangle::Node::Kind::Enum) {
-      candidate = dyn_cast<EnumDecl>(decl);
-    } else if (kind == Demangle::Node::Kind::Protocol) {
-      candidate = dyn_cast<ProtocolDecl>(decl);
-    } else {
-      assert(kind == Demangle::Node::Kind::Structure);
-      candidate = dyn_cast<StructDecl>(decl);
-    }
-    if (!candidate) return nullptr;
+    NominalTypeDecl *candidate = getAcceptableNominalTypeCandidate(decl, kind);
+    if (!candidate)
+      continue;
 
     // Ignore results that aren't actually from the defining module.
     if (candidate->getParentModule() != module)
@@ -492,90 +667,435 @@ RemoteASTTypeBuilder::findNominalTypeDecl(DeclContext *dc,
   return result;
 }
 
+NominalTypeDecl *
+RemoteASTTypeBuilder::findForeignNominalTypeDecl(Identifier name,
+                                                 Demangle::Node::Kind kind) {
+  // Check to see if we have an importer loaded.
+  auto importer = static_cast<ClangImporter *>(Ctx.getClangModuleLoader());
+  if (!importer) return nullptr;
+
+  // Find the unique declaration that has the right kind.
+  struct Consumer : VisibleDeclConsumer {
+    Demangle::Node::Kind ExpectedKind;
+    NominalTypeDecl *Result = nullptr;
+    bool HadError = false;
+
+    explicit Consumer(Demangle::Node::Kind kind) : ExpectedKind(kind) {}
+
+    void foundDecl(ValueDecl *decl, DeclVisibilityKind reason) override {
+      if (HadError) return;
+      auto typeDecl = getAcceptableNominalTypeCandidate(decl, ExpectedKind);
+      if (!typeDecl) return;
+      if (typeDecl == Result) return;
+      if (!Result) {
+        Result = typeDecl;
+      } else {
+        HadError = true;
+        Result = nullptr;
+      }
+    }
+  } consumer(kind);
+
+  importer->lookupValue(name, consumer);
+
+  return consumer.Result;
+}
+
 namespace {
+
+/// The basic implementation of the RemoteASTContext interface.
+/// The template subclasses do target-specific logic.
 class RemoteASTContextImpl {
-  using Reader32Ty = MetadataReader<External<RuntimeTarget<4>>,
-                                    RemoteASTTypeBuilder>;
-  using Reader64Ty = MetadataReader<External<RuntimeTarget<8>>,
-                                    RemoteASTTypeBuilder>;
-  union {
-    Reader32Ty *Reader32;
-    Reader64Ty *Reader64;
-  };
-  bool Is32;
+  std::unique_ptr<IRGenContext> IRGen;
+public:
+  RemoteASTContextImpl() = default;
+  virtual ~RemoteASTContextImpl() = default;
+
+  virtual Result<Type>
+  getTypeForRemoteTypeMetadata(RemoteAddress metadata, bool skipArtificial) = 0;
+  virtual Result<MetadataKind>
+  getKindForRemoteTypeMetadata(RemoteAddress metadata) = 0;
+  virtual Result<NominalTypeDecl*>
+  getDeclForRemoteNominalTypeDescriptor(RemoteAddress descriptor) = 0;
+  virtual Result<RemoteAddress>
+  getHeapMetadataForObject(RemoteAddress object) = 0;
+
+  Result<uint64_t>
+  getOffsetOfMember(Type type, RemoteAddress optMetadata, StringRef memberName){
+    // Sanity check: obviously invalid arguments.
+    if (!type || memberName.empty())
+      return Result<uint64_t>::emplaceFailure(Failure::BadArgument);
+
+    // Sanity check: if the caller gave us a dependent type, there's no way
+    // we can handle that.
+    if (type->hasTypeParameter() || type->hasArchetype())
+      return Result<uint64_t>::emplaceFailure(Failure::DependentArgument);
+
+    // Split into cases.
+    if (auto typeDecl = type->getNominalOrBoundGenericNominal()) {
+      return getOffsetOfField(type, typeDecl, optMetadata, memberName);
+    } else if (auto tupleType = type->getAs<TupleType>()) {
+      return getOffsetOfTupleElement(tupleType, optMetadata, memberName);
+    } else {
+      return Result<uint64_t>::emplaceFailure(Failure::TypeHasNoSuchMember,
+                                              memberName);
+    }
+  }
+
+protected:
+  template <class T>
+  Result<T> getFailure() {
+    return getBuilder().getFailureAsResult<T>(Failure::Unknown);
+  }
+
+  template <class T, class KindTy, class... ArgTys>
+  Result<T> fail(KindTy kind, ArgTys &&...args) {
+    return Result<T>::emplaceFailure(kind, std::forward<ArgTys>(args)...);
+  }
+
+private:
+  virtual RemoteASTTypeBuilder &getBuilder() = 0;
+  virtual MemoryReader &getReader() = 0;
+  virtual bool readWordOffset(RemoteAddress address, int64_t *offset) = 0;
+  virtual std::unique_ptr<IRGenContext> createIRGenContext() = 0;
+  virtual Result<uint64_t>
+  getOffsetOfTupleElementFromMetadata(RemoteAddress metadata,
+                                      unsigned elementIndex) = 0;
+  virtual Result<uint64_t>
+  getOffsetOfFieldFromMetadata(RemoteAddress metadata,
+                               StringRef memberName) = 0;
+
+  IRGenContext *getIRGen() {
+    if (!IRGen) IRGen = createIRGenContext();
+    return IRGen.get();
+  }
+
+  Result<uint64_t>
+  getOffsetOfField(Type type, NominalTypeDecl *typeDecl,
+                   RemoteAddress optMetadata, StringRef memberName) {
+    if (!isa<StructDecl>(typeDecl) && !isa<ClassDecl>(typeDecl))
+      return fail<uint64_t>(Failure::Unimplemented,
+                            "access members of this kind of type");
+
+    // Try to find the member.
+    VarDecl *member = findField(typeDecl, memberName);
+
+    // If we found a member, try to find its offset statically.
+    if (member) {
+      if (auto irgen = getIRGen()) {
+        return getOffsetOfFieldFromIRGen(irgen->IGM, type, typeDecl,
+                                          optMetadata, member);
+      }
+    }
+
+    // Try searching the metadata for a member with the given name.
+    if (optMetadata) {
+      return getOffsetOfFieldFromMetadata(optMetadata, memberName);
+    }
+
+    // Okay, that's everything we know how to try.
+
+    // Use a specialized diagnostic if we couldn't find any such member.
+    if (!member) {
+      return fail<uint64_t>(Failure::TypeHasNoSuchMember, memberName);
+    }
+
+    return fail<uint64_t>(Failure::Unknown);
+  }
+
+  /// Look for an instance property of the given nominal type that's
+  /// known to be stored.
+  VarDecl *findField(NominalTypeDecl *typeDecl, StringRef memberName) {
+    for (auto field : typeDecl->getStoredProperties()) {
+      if (field->getName().str() == memberName)
+        return field;
+    }
+    return nullptr;
+  }
+
+  using MemberAccessStrategy = irgen::MemberAccessStrategy;
+
+  Result<uint64_t>
+  getOffsetOfFieldFromIRGen(irgen::IRGenModule &IGM, Type type,
+                            NominalTypeDecl *typeDecl,
+                            RemoteAddress optMetadata, VarDecl *member) {
+    SILType loweredTy = IGM.getSILTypes().getLoweredType(type);
+
+    MemberAccessStrategy strategy =
+      (isa<StructDecl>(typeDecl)
+        ? getPhysicalStructMemberAccessStrategy(IGM, loweredTy, member)
+        : getPhysicalClassMemberAccessStrategy(IGM, loweredTy, member));
+
+    switch (strategy.getKind()) {
+    case MemberAccessStrategy::Kind::Complex:
+      return fail<uint64_t>(Failure::Unimplemented,
+                            "access members with complex storage");
+
+    case MemberAccessStrategy::Kind::DirectFixed:
+      return uint64_t(strategy.getDirectOffset().getValue());
+
+    case MemberAccessStrategy::Kind::DirectGlobal: {
+      RemoteAddress directOffsetAddress =
+        getReader().getSymbolAddress(strategy.getDirectGlobalSymbol());
+      if (!directOffsetAddress)
+        return getFailure<uint64_t>();
+
+      return readDirectOffset(directOffsetAddress,
+                              strategy.getDirectOffsetKind());
+    }
+
+    case MemberAccessStrategy::Kind::IndirectFixed: {
+      // We can't apply indirect offsets without metadata.
+      if (!optMetadata)
+        return fail<uint64_t>(Failure::Unimplemented,
+                              "access generically-offset members without "
+                              "metadata");
+
+      Size indirectOffset = strategy.getIndirectOffset();
+      return readIndirectOffset(optMetadata, indirectOffset,
+                                strategy.getDirectOffsetKind());
+    }
+
+    case MemberAccessStrategy::Kind::IndirectGlobal: {
+      // We can't apply indirect offsets without metadata.
+      if (!optMetadata)
+        return fail<uint64_t>(Failure::Unimplemented,
+                              "access generically-offset members without "
+                              "metadata");
+
+      RemoteAddress indirectOffsetAddress =
+        getReader().getSymbolAddress(strategy.getIndirectGlobalSymbol());
+
+      Size indirectOffset;
+      if (!readOffset(indirectOffsetAddress,
+                      strategy.getIndirectOffsetKind(),
+                      indirectOffset))
+        return getFailure<uint64_t>();
+
+      return readIndirectOffset(optMetadata, indirectOffset,
+                                strategy.getDirectOffsetKind());
+    }
+    }
+    llvm_unreachable("bad member MemberAccessStrategy");
+  }
+
+  bool readOffset(RemoteAddress address,
+                  MemberAccessStrategy::OffsetKind kind,
+                  Size &offset) {
+    switch (kind) {
+    case MemberAccessStrategy::OffsetKind::Bytes_Word: {
+      int64_t rawOffset;
+      if (!readWordOffset(address, &rawOffset))
+        return false;
+      offset = Size(rawOffset);
+      return true;
+    }
+    }
+    llvm_unreachable("bad offset kind");
+  }
+
+  Result<uint64_t> readIndirectOffset(RemoteAddress metadata,
+                                      Size indirectOffset,
+                                      MemberAccessStrategy::OffsetKind kind) {
+    RemoteAddress directOffsetAddress = metadata + indirectOffset;
+    return readDirectOffset(directOffsetAddress, kind);
+  }
+
+
+  Result<uint64_t> readDirectOffset(RemoteAddress directOffsetAddress,
+                                    MemberAccessStrategy::OffsetKind kind) {
+    Size directOffset;
+    if (!readOffset(directOffsetAddress, kind, directOffset))
+      return getFailure<uint64_t>();
+
+    return uint64_t(directOffset.getValue());
+  }
+
+  /// Read the
+  Result<uint64_t>
+  getOffsetOfTupleElement(TupleType *type, RemoteAddress optMetadata,
+                          StringRef memberName) {
+    // Check that the member "name" is a valid index into the tuple.
+    unsigned targetIndex;
+    if (memberName.getAsInteger(10, targetIndex) ||
+        targetIndex >= type->getNumElements())
+      return fail<uint64_t>(Failure::TypeHasNoSuchMember, memberName);
+
+    // Fast path: element 0 is always at offset 0.
+    if (targetIndex == 0) return uint64_t(0);
+
+    // Create an IRGen instance.
+    auto irgen = getIRGen();
+    if (!irgen) return Result<uint64_t>::emplaceFailure(Failure::Unknown);
+    auto &IGM = irgen->IGM;
+
+    SILType loweredTy = IGM.getSILTypes().getLoweredType(type);
+
+    // If the type has a statically fixed offset, return that.
+    if (auto offset =
+          irgen::getFixedTupleElementOffset(IGM, loweredTy, targetIndex))
+      return offset->getValue();
+
+    // If we have metadata, go load from that.
+    if (optMetadata)
+      return getOffsetOfTupleElementFromMetadata(optMetadata, targetIndex);
+
+    // Okay, reproduce tuple layout.
+
+    // Find the last element with a known offset.  Note that we don't
+    // have to ask IRGen about element 0 because we know its size is zero.
+    Size lastOffset = Size(0);
+    unsigned lastIndex = targetIndex;
+    for (--lastIndex; lastIndex != 0; --lastIndex) {
+      if (auto offset =
+            irgen::getFixedTupleElementOffset(IGM, loweredTy, lastIndex)) {
+        lastOffset = *offset;
+        break;
+      }
+    }
+
+    // Okay, iteratively build up from there.
+    for (; ; ++lastIndex) {
+      // Try to get the size and alignment of this element.
+      SILType eltTy = loweredTy.getTupleElementType(lastIndex);
+      auto sizeAndAlignment = getTypeSizeAndAlignment(IGM, eltTy);
+      if (!sizeAndAlignment) return getFailure<uint64_t>();
+
+      // Round up to the alignment of the element.
+      lastOffset = lastOffset.roundUpToAlignment(sizeAndAlignment->second);
+
+      // If this is the target, we're done.
+      if (lastIndex == targetIndex)
+        return lastOffset.getValue();
+
+      // Otherwise, skip forward by the size of the element.
+      lastOffset += sizeAndAlignment->first;
+    }
+
+    llvm_unreachable("didn't reach target index");
+  }
+
+  /// Attempt to discover the size and alignment of the given type.
+  Optional<std::pair<Size, Alignment>>
+  getTypeSizeAndAlignment(irgen::IRGenModule &IGM, SILType eltTy) {
+    auto &eltTI = IGM.getTypeInfo(eltTy);
+    if (auto fixedTI = dyn_cast<irgen::FixedTypeInfo>(&eltTI)) {
+      return std::make_pair(fixedTI->getFixedSize(),
+                            fixedTI->getFixedAlignment());
+    }
+
+    // TODO: handle resilient types
+    return None;
+  }
+};
+
+/// A template for generating target-specific implementations of the
+/// RemoteASTContext interface.
+template <class Runtime>
+class RemoteASTContextConcreteImpl final : public RemoteASTContextImpl {
+  MetadataReader<Runtime, RemoteASTTypeBuilder> Reader;
+
+  RemoteASTTypeBuilder &getBuilder() override {
+    return Reader.Builder;
+  }
+
+  MemoryReader &getReader() override {
+    return *Reader.Reader;
+  }
+
+  bool readWordOffset(RemoteAddress address, int64_t *extendedOffset) override {
+    using unsigned_size_t = typename Runtime::StoredSize;
+    using signed_size_t = typename std::make_signed<unsigned_size_t>::type;
+    signed_size_t offset;
+    if (!getReader().readInteger(address, &offset))
+      return false;
+
+    *extendedOffset = offset;
+    return true;
+  }
 
 public:
-  RemoteASTContextImpl(ASTContext &ctx,
-                       std::shared_ptr<MemoryReader> &&reader) {
-    auto &target = ctx.LangOpts.Target;
-    assert(target.isArch32Bit() || target.isArch64Bit());
+  RemoteASTContextConcreteImpl(std::shared_ptr<MemoryReader> &&reader,
+                               ASTContext &ctx)
+    : Reader(std::move(reader), ctx) {}
 
-    Is32 = target.isArch32Bit();
-    if (Is32) {
-      Reader32 = new Reader32Ty(std::move(reader), ctx);
-    } else {
-      Reader64 = new Reader64Ty(std::move(reader), ctx);
-    }
+  Result<Type> getTypeForRemoteTypeMetadata(RemoteAddress metadata,
+                                            bool skipArtificial) override {
+    if (auto result = Reader.readTypeFromMetadata(metadata.getAddressData(),
+                                                  skipArtificial))
+      return result;
+    return getFailure<Type>();
   }
 
-  ~RemoteASTContextImpl() {
-    if (Is32) {
-      delete Reader32;
-    } else {
-      delete Reader64;
-    }
+  Result<MetadataKind>
+  getKindForRemoteTypeMetadata(RemoteAddress metadata) override {
+    auto result = Reader.readKindFromMetadata(metadata.getAddressData());
+    if (result.first)
+      return result.second;
+    return getFailure<MetadataKind>();
   }
 
-  Result<Type> getTypeForRemoteTypeMetadata(RemoteAddress address) {
-    Type result;
-    if (Is32) {
-      result = Reader32->readTypeFromMetadata(address.getAddressData());
-    } else {
-      result = Reader64->readTypeFromMetadata(address.getAddressData());
-    }
-    if (result) return result;
-    return Result<Type>::emplaceFailure(Failure::Unknown);
+  Result<NominalTypeDecl*>
+  getDeclForRemoteNominalTypeDescriptor(RemoteAddress descriptor) override {
+    if (auto result =
+          Reader.readNominalTypeFromDescriptor(descriptor.getAddressData()))
+      return result;
+    return getFailure<NominalTypeDecl*>();
   }
 
-  Result<MetadataKind> getKindForRemoteTypeMetadata(RemoteAddress address) {
-    std::pair<bool,MetadataKind> result;
-    if (Is32) {
-      result = Reader32->readKindFromMetadata(address.getAddressData());
-    } else {
-      result = Reader64->readKindFromMetadata(address.getAddressData());
-    }
-    if (result.first) return Result<MetadataKind>(result.second);
-    return Result<MetadataKind>::emplaceFailure(Failure::Unknown);
+  std::unique_ptr<IRGenContext> createIRGenContext() override {
+    return getBuilder().createIRGenContext();
   }
 
-  Result<NominalTypeDecl *>
-  getDeclForRemoteNominalTypeDescriptor(RemoteAddress address) {
-    NominalTypeDecl *result;
-    if (Is32) {
-      result =Reader32->readNominalTypeFromDescriptor(address.getAddressData());
-    } else {
-      result =Reader64->readNominalTypeFromDescriptor(address.getAddressData());
-    }
-
-    if (result) return result;
-    return Result<NominalTypeDecl *>::emplaceFailure(Failure::Unknown);
+  Result<uint64_t>
+  getOffsetOfTupleElementFromMetadata(RemoteAddress metadata,
+                                      unsigned index) override {
+    typename Runtime::StoredSize offset;
+    if (Reader.readTupleElementOffset(metadata.getAddressData(),
+                                      index, &offset))
+      return uint64_t(offset);
+    return getFailure<uint64_t>();
   }
 
-  Result<uint64_t> getOffsetForProperty(Type type, StringRef propertyName) {
-    // TODO
-    return Result<uint64_t>::emplaceFailure(Failure::Unknown);
+  Result<uint64_t>
+  getOffsetOfFieldFromMetadata(RemoteAddress metadata,
+                               StringRef memberName) override {
+    // TODO: this would be useful for resilience
+    return fail<uint64_t>(Failure::Unimplemented,
+                          "look up field offset by name");
+  }
+
+  Result<RemoteAddress>
+  getHeapMetadataForObject(RemoteAddress object) override {
+    auto result = Reader.readMetadataFromInstance(object.getAddressData());
+    if (result.first) return RemoteAddress(result.second);
+    return getFailure<RemoteAddress>();
   }
 };
 
 } // end anonymous namespace
 
-static RemoteASTContextImpl* asImpl(void *impl) {
+static RemoteASTContextImpl *createImpl(ASTContext &ctx,
+                                      std::shared_ptr<MemoryReader> &&reader) {
+  auto &target = ctx.LangOpts.Target;
+  assert(target.isArch32Bit() || target.isArch64Bit());
+
+  if (target.isArch32Bit()) {
+    using Target = External<RuntimeTarget<4>>;
+    return new RemoteASTContextConcreteImpl<Target>(std::move(reader), ctx);
+  } else {
+    using Target = External<RuntimeTarget<8>>;
+    return new RemoteASTContextConcreteImpl<Target>(std::move(reader), ctx);
+  }
+}
+
+static RemoteASTContextImpl *asImpl(void *impl) {
   return static_cast<RemoteASTContextImpl*>(impl);
 }
 
 RemoteASTContext::RemoteASTContext(ASTContext &ctx,
                                    std::shared_ptr<MemoryReader> reader)
-  : Impl(new RemoteASTContextImpl(ctx, std::move(reader))) {
+  : Impl(createImpl(ctx, std::move(reader))) {
 }
 
 RemoteASTContext::~RemoteASTContext() {
@@ -583,8 +1103,9 @@ RemoteASTContext::~RemoteASTContext() {
 }
 
 Result<Type>
-RemoteASTContext::getTypeForRemoteTypeMetadata(RemoteAddress address) {
-  return asImpl(Impl)->getTypeForRemoteTypeMetadata(address);
+RemoteASTContext::getTypeForRemoteTypeMetadata(RemoteAddress address,
+                                               bool skipArtificial) {
+  return asImpl(Impl)->getTypeForRemoteTypeMetadata(address, skipArtificial);
 }
 
 Result<MetadataKind>
@@ -598,6 +1119,12 @@ RemoteASTContext::getDeclForRemoteNominalTypeDescriptor(RemoteAddress address) {
 }
 
 Result<uint64_t>
-RemoteASTContext::getOffsetForProperty(Type type, StringRef propertyName) {
-  return asImpl(Impl)->getOffsetForProperty(type, propertyName);
+RemoteASTContext::getOffsetOfMember(Type type, RemoteAddress optMetadata,
+                                    StringRef memberName) {
+  return asImpl(Impl)->getOffsetOfMember(type, optMetadata, memberName);
+}
+
+Result<remote::RemoteAddress>
+RemoteASTContext::getHeapMetadataForObject(remote::RemoteAddress address) {
+  return asImpl(Impl)->getHeapMetadataForObject(address);
 }

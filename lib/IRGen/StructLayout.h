@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 //
@@ -219,9 +219,9 @@ public:
 class StructLayoutBuilder {
 protected:
   IRGenModule &IGM;
-private:
   SmallVector<llvm::Type*, 8> StructFields;
   Size CurSize = Size(0);
+private:
   Alignment CurAlignment = Alignment(1);
   SpareBitVector CurSpareBits;
   unsigned NextNonFixedOffsetIndex = 0;
@@ -233,9 +233,12 @@ public:
   StructLayoutBuilder(IRGenModule &IGM) : IGM(IGM) {}
 
   /// Add a swift heap header to the layout.  This must be the first
-  /// call to the layout.
+  /// thing added to the layout.
   void addHeapHeader();
-
+  /// Add the NSObject object header to the layout. This must be the first
+  /// thing added to the layout.
+  void addNSObjectHeader();
+  
   /// Add a number of fields to the layout.  The field layouts need
   /// only have the TypeInfo set; the rest will be filled out.
   ///
@@ -243,6 +246,13 @@ public:
   /// requirements of the layout.
   bool addFields(llvm::MutableArrayRef<ElementLayout> fields,
                  LayoutStrategy strategy);
+
+  /// Add a field to the layout.  The field layout needs
+  /// only have the TypeInfo set; the rest will be filled out.
+  ///
+  /// Returns true if the field may have increased the storage
+  /// requirements of the layout.
+  bool addField(ElementLayout &elt, LayoutStrategy strategy);
 
   /// Return whether the layout is known to be empty.
   bool empty() const { return IsFixedLayout && CurSize == Size(0); }
@@ -387,9 +397,6 @@ public:
 
 Size getHeapHeaderSize(IRGenModule &IGM);
 
-void addHeapHeaderToLayout(IRGenModule &IGM, Size &size, Alignment &align,
-                           SmallVectorImpl<llvm::Type*> &fieldTypes);
-
 /// Different policies for accessing a physical field.
 enum class FieldAccess : uint8_t {
   /// Instance variable offsets are constant.
@@ -418,9 +425,6 @@ struct ClassLayout {
   ArrayRef<VarDecl*> InheritedStoredProperties;
   /// Lazily-initialized array of all field access methods.
   ArrayRef<FieldAccess> AllFieldAccesses;
-  /// Lazily-initialized metadata access method. See the comment in
-  /// ClassLayoutBuilder.
-  FieldAccess MetadataAccess;
   /// Does the class metadata require dynamic initialization.
   bool MetadataRequiresDynamicInitialization;
 

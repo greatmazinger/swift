@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 
@@ -30,19 +30,9 @@ using namespace swift::index;
 
 static UIdent KindImportModuleClang("source.lang.swift.import.module.clang");
 static UIdent KindImportModuleSwift("source.lang.swift.import.module.swift");
-static UIdent KindImportSourceFile("source.lang.swift.import.sourcefile");
 
-static UIdent getUIDForDependencyKind(SymbolKind depKind) {
-  switch (depKind) {
-  case SymbolKind::Module:
-    return KindImportModuleSwift;
-  case SymbolKind::ClangModule:
-    return KindImportModuleClang;
-  case SymbolKind::SourceFile:
-    return KindImportSourceFile;
-  default:
-    return UIdent();
-  }
+static UIdent getUIDForDependencyKind(bool isClangModule) {
+  return isClangModule ? KindImportModuleClang : KindImportModuleSwift;
 }
 
 class SKIndexDataConsumer : public IndexDataConsumer {
@@ -64,69 +54,98 @@ private:
     return impl.recordHash(hash, isKnown);
   }
 
-  bool startDependency(SymbolKind kind, StringRef name, StringRef path,
+  bool startDependency(StringRef name, StringRef path, bool isClangModule,
                        bool isSystem, StringRef hash) override {
-    auto kindUID = getUIDForDependencyKind(kind);
+    auto kindUID = getUIDForDependencyKind(isClangModule);
     return impl.startDependency(kindUID, name, path, isSystem, hash);
   }
 
-  bool finishDependency(SymbolKind kind) override {
-    return impl.finishDependency(getUIDForDependencyKind(kind));
+  bool finishDependency(bool isClangModule) override {
+    return impl.finishDependency(getUIDForDependencyKind(isClangModule));
   }
 
-  bool startSourceEntity(const IndexSymbol &symbol) override {
-    return withEntityInfo(symbol, [this](const EntityInfo &info) {
-      return impl.startSourceEntity(info);
-    });
+  Action startSourceEntity(const IndexSymbol &symbol) override {
+    if (symbol.symInfo.Kind == SymbolKind::Parameter)
+      return Skip;
+
+    // report any parent relations to this reference
+    if (symbol.roles & (SymbolRoleSet)SymbolRole::RelationBaseOf) {
+      withEntityInfo(symbol, [this](const EntityInfo &info) {
+        return impl.recordRelatedEntity(info);
+      });
+    }
+
+    // filter out references with invalid locations
+    if (symbol.roles & (SymbolRoleSet)SymbolRole::Reference &&
+        (symbol.line == 0 || symbol.column == 0))
+      return Skip;
+
+
+    // start the entity (ref or def)
+    if (!withEntityInfo(symbol, [this](const EntityInfo &info) {
+        return impl.startSourceEntity(info);
+    })) return Abort;
+
+
+    // report relations this occurrence has
+    for (auto Relation: symbol.Relations) {
+      if (Relation.roles & (SymbolRoleSet)SymbolRole::RelationOverrideOf) {
+        if (!withEntityInfo(Relation, [this](const EntityInfo &info) {
+          return impl.recordRelatedEntity(info);
+        })) return Abort;
+      }
+    }
+    return Continue;
   }
 
-  bool recordRelatedEntity(const IndexSymbol &symbol) override {
-    return withEntityInfo(symbol, [this](const EntityInfo &info) {
-      return impl.recordRelatedEntity(info);
-    });
-  }
-
-  bool finishSourceEntity(SymbolKind kind, SymbolSubKind subKind,
-                          bool isRef) override {
-    auto UID = SwiftLangSupport::getUIDForSymbol(kind, subKind, isRef);
+  bool finishSourceEntity(SymbolInfo symInfo, SymbolRoleSet roles) override {
+    bool isRef = roles & (unsigned)SymbolRole::Reference;
+    auto UID = SwiftLangSupport::getUIDForSymbol(symInfo, isRef);
     return impl.finishSourceEntity(UID);
   }
 
   template <typename F>
   bool withEntityInfo(const IndexSymbol &symbol, F func) {
-    auto initEntity = [](EntityInfo &info, const IndexSymbol &symbol) {
-      info.Kind = SwiftLangSupport::getUIDForSymbol(symbol.kind, symbol.subKind,
-                                                    symbol.isRef);
-      info.Name = symbol.name;
-      info.USR = symbol.USR;
-      info.Group = symbol.group;
-      info.Line = symbol.line;
-      info.Column = symbol.column;
-    };
+    EntityInfo info;
+    bool isRef = symbol.roles & (unsigned)SymbolRole::Reference;
+    bool isImplicit = symbol.roles & (unsigned)SymbolRole::Implicit;
 
-    switch (symbol.entityType) {
-    case IndexSymbol::Base: {
-      EntityInfo info;
-      initEntity(info, symbol);
-      return func(info);
+    info.Kind = SwiftLangSupport::getUIDForSymbol(symbol.symInfo, isRef);
+    info.Name = isImplicit? "" : symbol.name;
+    info.USR = symbol.USR;
+    info.Group = symbol.group;
+    info.Line = symbol.line;
+    info.Column = symbol.column;
+    info.ReceiverUSR = symbol.getReceiverUSR();
+    info.IsDynamic = symbol.roles & (unsigned)SymbolRole::Dynamic;
+    info.IsTestCandidate = symbol.symInfo.Properties & SymbolProperty::UnitTest;
+    std::vector<UIdent> uidAttrs;
+    if (!isRef) {
+      uidAttrs =
+        SwiftLangSupport::UIDsFromDeclAttributes(symbol.decl->getAttrs());
+      info.Attrs = uidAttrs;
     }
-    case IndexSymbol::FuncDecl: {
-      FuncDeclEntityInfo info;
-      initEntity(info, symbol);
-      info.IsTestCandidate =
-          static_cast<const FuncDeclIndexSymbol &>(symbol).IsTestCandidate;
-      return func(info);
+    return func(info);
+  }
+
+  template <typename F>
+  bool withEntityInfo(const IndexRelation &relation, F func) {
+    EntityInfo info;
+    bool isRef = (relation.roles & (unsigned)SymbolRole::Reference) ||
+      (relation.roles & (unsigned)SymbolRole::RelationOverrideOf);
+    info.Kind = SwiftLangSupport::getUIDForSymbol(relation.symInfo, isRef);
+    info.Name = relation.name;
+    info.USR = relation.USR;
+    info.Group = relation.group;
+    info.IsDynamic = relation.roles & (unsigned)SymbolRole::Dynamic;
+    info.IsTestCandidate = relation.symInfo.Properties & SymbolProperty::UnitTest;
+    std::vector<UIdent> uidAttrs;
+    if (!isRef) {
+      uidAttrs =
+      SwiftLangSupport::UIDsFromDeclAttributes(relation.decl->getAttrs());
+      info.Attrs = uidAttrs;
     }
-    case IndexSymbol::CallReference: {
-      CallRefEntityInfo info;
-      initEntity(info, symbol);
-      auto call = static_cast<const CallRefIndexSymbol &>(symbol);
-      info.ReceiverUSR = call.ReceiverUSR;
-      info.IsDynamic = call.IsDynamic;
-      return func(info);
-    }
-    }
-    llvm_unreachable("unexpected symbol kind");
+    return func(info);
   }
 
 private:
@@ -153,7 +172,7 @@ static void indexModule(llvm::MemoryBuffer *Input,
 
   ASTContext &Ctx = CI.getASTContext();
   std::unique_ptr<SerializedModuleLoader> Loader;
-  Module *Mod = nullptr;
+  ModuleDecl *Mod = nullptr;
   if (ModuleName == Ctx.StdlibModuleName.str()) {
     Mod = Ctx.getModule({ {Ctx.StdlibModuleName, SourceLoc()} });
   } else {
@@ -164,7 +183,7 @@ static void indexModule(llvm::MemoryBuffer *Input,
 
     // FIXME: These APIs allocate memory on the ASTContext, meaning it may not
     // be freed for a long time.
-    Mod = Module::create(Ctx.getIdentifier(ModuleName), Ctx);
+    Mod = ModuleDecl::create(Ctx.getIdentifier(ModuleName), Ctx);
     // Indexing is not using documentation now, so don't open the module
     // documentation file.
     // FIXME: refactor the frontend to provide an easy way to figure out the
@@ -212,7 +231,7 @@ void trace::initTraceFiles(trace::SwiftInvocation &SwiftArgs,
 
 void SwiftLangSupport::indexSource(StringRef InputFile,
                                    IndexingConsumer &IdxConsumer,
-                                   ArrayRef<const char *> Args,
+                                   ArrayRef<const char *> OrigArgs,
                                    StringRef Hash) {
   std::string Error;
   auto InputBuf = ASTMgr->getMemoryBuffer(InputFile, Error);
@@ -229,6 +248,12 @@ void SwiftLangSupport::indexSource(StringRef InputFile,
   // Display diagnostics to stderr.
   PrintingDiagnosticConsumer PrintDiags;
   CI.addDiagnosticConsumer(&PrintDiags);
+
+  // Add -disable-typo-correction, since the errors won't be captured in the
+  // response, and it can be expensive to do typo-correction when there are many
+  // errors, which is common in indexing.
+  SmallVector<const char *, 16> Args(OrigArgs.begin(), OrigArgs.end());
+  Args.push_back("-disable-typo-correction");
 
   CompilerInvocation Invocation;
   bool Failed = getASTManager().initCompilerInvocation(Invocation, Args,
@@ -254,7 +279,7 @@ void SwiftLangSupport::indexSource(StringRef InputFile,
     return;
   }
 
-  if (Invocation.getInputFilenames().empty()) {
+  if (!Invocation.getFrontendOptions().Inputs.hasInputFilenames()) {
     IdxConsumer.failed("no input filenames specified");
     return;
   }

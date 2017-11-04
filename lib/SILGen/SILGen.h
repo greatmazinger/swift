@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 
@@ -17,12 +17,15 @@
 #include "Cleanup.h"
 #include "SILGenProfiling.h"
 #include "swift/AST/ASTContext.h"
+#include "swift/AST/AnyFunctionRef.h"
 #include "swift/AST/DiagnosticEngine.h"
+#include "swift/Basic/ProfileCounter.h"
 #include "swift/SIL/SILDebugScope.h"
 #include "swift/SIL/SILFunction.h"
 #include "swift/SIL/SILModule.h"
 #include "swift/SIL/TypeLowering.h"
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/ProfileData/InstrProfReader.h"
 #include <deque>
 
 namespace swift {
@@ -49,7 +52,7 @@ public:
   TypeConverter &Types;
   
   /// The Swift module we are visiting.
-  Module *SwiftModule;
+  ModuleDecl *SwiftModule;
   
   /// TopLevelSGF - The SILGenFunction used to visit top-level code, or null if
   /// the current source file is not a script source file.
@@ -58,6 +61,24 @@ public:
   /// The profiler for instrumentation based profiling, or null if profiling is
   /// disabled.
   std::unique_ptr<SILGenProfiling> Profiler;
+
+  /// The indexed profile data to be used for PGO, or nullptr.
+  std::unique_ptr<llvm::IndexedInstrProfReader> PGOReader;
+
+  /// Load the profiled execution count corresponding to \p N, if one is
+  /// available.
+  ProfileCounter loadProfilerCount(ASTNode N) {
+    if (PGOReader && Profiler && Profiler->hasRegionCounters())
+      return Profiler->getExecutionCount(N);
+    return ProfileCounter();
+  }
+
+  /// Get the PGO's node parent
+  Optional<ASTNode> getPGOParent(ASTNode Node) {
+    if (PGOReader && Profiler && Profiler->hasRegionCounters())
+      return Profiler->getPGOParent(Node);
+    return None;
+  }
 
   /// Mapping from SILDeclRefs to emitted SILFunctions.
   llvm::DenseMap<SILDeclRef, SILFunction*> emittedFunctions;
@@ -100,13 +121,9 @@ public:
   NormalProtocolConformance *lastEmittedConformance = nullptr;
 
   SILFunction *emitTopLevelFunction(SILLocation Loc);
-  
+
   size_t anonymousSymbolCounter = 0;
-  
-  /// If true, all functions and globals are made fragile. Currently only used
-  /// for compiling the stdlib.
-  bool makeModuleFragile;
-  
+
   Optional<SILDeclRef> StringToNSStringFn;
   Optional<SILDeclRef> NSStringToStringFn;
   Optional<SILDeclRef> ArrayToNSArrayFn;
@@ -119,8 +136,8 @@ public:
   Optional<SILDeclRef> ObjCBoolToBoolFn;
   Optional<SILDeclRef> BoolToDarwinBooleanFn;
   Optional<SILDeclRef> DarwinBooleanToBoolFn;
-  Optional<SILDeclRef> NSErrorToErrorProtocolFn;
-  Optional<SILDeclRef> ErrorProtocolToNSErrorFn;
+  Optional<SILDeclRef> NSErrorToErrorFn;
+  Optional<SILDeclRef> ErrorToNSErrorFn;
 
   Optional<ProtocolDecl*> PointerProtocol;
 
@@ -129,8 +146,14 @@ public:
   Optional<FuncDecl*> UnconditionallyBridgeFromObjectiveCRequirement;
   Optional<AssociatedTypeDecl*> BridgedObjectiveCType;
 
+  Optional<ProtocolDecl*> BridgedStoredNSError;
+  Optional<VarDecl*> NSErrorRequirement;
+
+  Optional<ProtocolConformance *> NSErrorConformanceToError;
+
 public:
-  SILGenModule(SILModule &M, Module *SM, bool makeModuleFragile);
+  SILGenModule(SILModule &M, ModuleDecl *SM);
+
   ~SILGenModule();
   
   SILGenModule(SILGenModule const &) = delete;
@@ -161,13 +184,14 @@ public:
   
   /// Get the dynamic dispatch thunk for a SILDeclRef.
   SILFunction *getDynamicThunk(SILDeclRef constant,
-                               SILConstantInfo constantInfo);
+                               CanSILFunctionType constantTy);
   
   /// Emit a vtable thunk for a derived method if its natural abstraction level
   /// diverges from the overridden base method. If no thunking is needed,
   /// returns a static reference to the derived method.
-  SILFunction *emitVTableMethod(SILDeclRef derived,
-                                SILDeclRef base);
+  Optional<SILVTable::Entry> emitVTableMethod(ClassDecl *theClass,
+                                              SILDeclRef derived,
+                                              SILDeclRef base);
 
   /// True if a function has been emitted for a given SILDeclRef.
   bool hasFunction(SILDeclRef constant);
@@ -176,15 +200,20 @@ public:
   SILType getLoweredType(Type t) {
     return Types.getTypeLowering(t).getLoweredType();
   }
+
+  /// Translate a formal enum element decl into its lowered form.
+  ///
+  /// This just turns ImplicitlyUnwrappedOptional's cases into Optional's.
+  EnumElementDecl *getLoweredEnumElementDecl(EnumElementDecl *element);
   
   /// Get or create the declaration of a reabstraction thunk with the
   /// given signature.
   SILFunction *getOrCreateReabstractionThunk(
-                                           GenericParamList *thunkContextParams,
+                                           GenericEnvironment *genericEnv,
                                            CanSILFunctionType thunkType,
                                            CanSILFunctionType fromType,
                                            CanSILFunctionType toType,
-                                           IsFragile_t Fragile);
+                                           IsSerialized_t Serialized);
 
   /// Determine whether the given class has any instance variables that
   /// need to be destroyed.
@@ -205,12 +234,14 @@ public:
   void visitEnumCaseDecl(EnumCaseDecl *d) {}
   void visitEnumElementDecl(EnumElementDecl *d) {}
   void visitOperatorDecl(OperatorDecl *d) {}
+  void visitPrecedenceGroupDecl(PrecedenceGroupDecl *d) {}
   void visitTypeAliasDecl(TypeAliasDecl *d) {}
   void visitAbstractTypeParamDecl(AbstractTypeParamDecl *d) {}
   void visitSubscriptDecl(SubscriptDecl *d) {}
   void visitConstructorDecl(ConstructorDecl *d) {}
   void visitDestructorDecl(DestructorDecl *d) {}
   void visitModuleDecl(ModuleDecl *d) { }
+  void visitMissingMemberDecl(MissingMemberDecl *d) {}
 
   void visitFuncDecl(FuncDecl *fd);
   void visitPatternBindingDecl(PatternBindingDecl *vd);
@@ -250,16 +281,18 @@ public:
   void emitEnumConstructor(EnumElementDecl *decl);
 
   /// Emits the default argument generator with the given expression.
-  void emitDefaultArgGenerator(SILDeclRef constant, Expr *arg);
-  
-  /// Emits the default argument generator for the given function.
+  void emitDefaultArgGenerator(SILDeclRef constant, Expr *arg,
+                               DefaultArgumentKind kind);
+
+  /// Emits the stored property initializer for the given pattern.
+  void emitStoredPropertyInitialization(PatternBindingDecl *pd, unsigned i);
+
+  /// Emits default argument generators for the given parameter list.
   void emitDefaultArgGenerators(SILDeclRef::Loc decl,
-                                ArrayRef<ParameterList*> paramLists);
+                                ParameterList *paramList);
 
   /// Emits the curry thunk between two uncurry levels of a function.
-  void emitCurryThunk(ValueDecl *fd,
-                      SILDeclRef entryPoint,
-                      SILDeclRef nextEntryPoint);
+  void emitCurryThunk(SILDeclRef thunk);
   
   /// Emits a thunk from a foreign function to the native Swift convention.
   void emitForeignToNativeThunk(SILDeclRef thunk);
@@ -267,8 +300,9 @@ public:
   /// Emits a thunk from a Swift function to the native Swift convention.
   void emitNativeToForeignThunk(SILDeclRef thunk);
 
-  template<typename T>
-  void preEmitFunction(SILDeclRef constant, T *astNode,
+  void preEmitFunction(SILDeclRef constant,
+                       llvm::PointerUnion<ValueDecl *,
+                                          Expr *> astNode,
                        SILFunction *F,
                        SILLocation L);
   void postEmitFunction(SILDeclRef constant, SILFunction *F);
@@ -298,12 +332,11 @@ public:
   SILWitnessTable *getWitnessTable(ProtocolConformance *conformance);
   
   /// Emit a protocol witness entry point.
-  SILFunction *emitProtocolWitness(ProtocolConformance *conformance,
-                                   SILLinkage linkage,
-                                   SILDeclRef requirement,
-                                   SILDeclRef witness,
-                                   IsFreeFunctionWitness_t isFree,
-                                   ArrayRef<Substitution> witnessSubs);
+  SILFunction *
+  emitProtocolWitness(ProtocolConformanceRef conformance, SILLinkage linkage,
+                      IsSerialized_t isSerialized, SILDeclRef requirement,
+                      SILDeclRef witnessRef, IsFreeFunctionWitness_t isFree,
+                      Witness witness);
 
   /// Emit the default witness table for a resilient protocol.
   void emitDefaultWitnessTable(ProtocolDecl *protocol);
@@ -350,8 +383,12 @@ public:
   SILDeclRef getObjCBoolToBoolFn();
   SILDeclRef getBoolToDarwinBooleanFn();
   SILDeclRef getDarwinBooleanToBoolFn();
-  SILDeclRef getNSErrorToErrorProtocolFn();
-  SILDeclRef getErrorProtocolToNSErrorFn();
+  SILDeclRef getNSErrorToErrorFn();
+  SILDeclRef getErrorToNSErrorFn();
+
+#define FUNC_DECL(NAME, ID) \
+  FuncDecl *get##NAME(SILLocation loc);
+#include "swift/AST/KnownDecls.def"
   
   /// Retrieve the _ObjectiveCBridgeable protocol definition.
   ProtocolDecl *getObjectiveCBridgeable(SILLocation loc);
@@ -371,6 +408,20 @@ public:
   /// _ObjectiveCBridgeable protocol.
   ProtocolConformance *getConformanceToObjectiveCBridgeable(SILLocation loc,
                                                             Type type);
+
+  /// Retrieve the _BridgedStoredNSError protocol definition.
+  ProtocolDecl *getBridgedStoredNSError(SILLocation loc);
+
+  /// Retrieve the _BridgedStoredNSError._nsError requirement.
+  VarDecl *getNSErrorRequirement(SILLocation loc);
+
+  /// Find the conformance of the given Swift type to the
+  /// _BridgedStoredNSError protocol.
+  Optional<ProtocolConformanceRef>
+  getConformanceToBridgedStoredNSError(SILLocation loc, Type type);
+
+  /// Retrieve the conformance of NSError to the Error protocol.
+  ProtocolConformance *getNSErrorConformanceToError();
 
   /// Report a diagnostic.
   template<typename...T, typename...U>
@@ -395,13 +446,17 @@ public:
   void useConformance(ProtocolConformanceRef conformance);
 
   /// Mark protocol conformances from the given set of substitutions as used.
-  void useConformancesFromSubstitutions(ArrayRef<Substitution> subs);
+  void useConformancesFromSubstitutions(SubstitutionList subs);
 
-  /// Substitute the `Self` type from a protocol conformance into a protocol
-  /// requirement's type to get the type of the witness.
-  CanAnyFunctionType
-  substSelfTypeIntoProtocolRequirementType(CanGenericFunctionType reqtTy,
-                                           ProtocolConformance *conformance);
+  /// Emit a `mark_function_escape` instruction for top-level code when a
+  /// function or closure at top level refers to script globals.
+  void emitMarkFunctionEscapeForTopLevelCodeGlobals(SILLocation loc,
+                                                const CaptureInfo &captureInfo);
+
+  /// Get the substitutions necessary to invoke a non-member (global or local)
+  /// property.
+  SubstitutionList
+  getNonMemberVarDeclSubstitutions(VarDecl *var);
 
 private:
   /// Emit the deallocator for a class that uses the objc allocator.

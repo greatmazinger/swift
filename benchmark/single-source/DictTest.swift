@@ -2,15 +2,21 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 
 import TestsUtils
+
+
+public let Dictionary = [
+  BenchmarkInfo(name: "Dictionary", runFunction: run_Dictionary, tags: [.validation, .api, .Dictionary]),
+  BenchmarkInfo(name: "DictionaryOfObjects", runFunction: run_DictionaryOfObjects, tags: [.validation, .api, .Dictionary]),
+]
 
 @inline(never)
 public func run_Dictionary(scale: Int) {
@@ -119,11 +125,10 @@ public func run_Dictionary(scale: Int) {
   for _ in 1...N {
     Dict = [:]
     for word in Input {
-      Dict[word] = true;
+      Dict[word] = true
     }
   }
-  CheckResults(Dict.count == 270,
-               "IncorrectResults in DictTest: \(Dict.count) != 270.")
+  CheckResults(Dict.count == 270)
 
   // Check performance of searching in the dictionary:
   // Fill the dictionary with words from the first half of the text
@@ -142,27 +147,23 @@ public func run_Dictionary(scale: Int) {
       }
     }
   }
-  CheckResults(count == N*541,
-               "IncorrectResults in DictTest: \(count) != \(N*541).")
+  CheckResults(count == N*541)
 }
 
-class Box<T : Hashable where T : Equatable> : Hashable {
+class Box<T : Hashable> : Hashable {
   var value: T
 
   init(_ v: T) {
     value = v
   }
 
-  var hashValue : Int {
+  var hashValue: Int {
     return value.hashValue
   }
-}
 
-extension Box : Equatable {
-}
-
-func ==<T: Equatable>(lhs: Box<T>, rhs: Box<T>) -> Bool {
-  return lhs.value == rhs.value
+  static func ==(lhs: Box, rhs: Box) -> Bool {
+    return lhs.value == rhs.value
+  }
 }
 
 @inline(never)
@@ -272,11 +273,10 @@ public func run_DictionaryOfObjects(scale: Int) {
   for _ in 1...N {
     Dict = [:]
     for word in Input {
-      Dict[Box(word)] = Box(true);
+      Dict[Box(word)] = Box(true)
     }
   }
-  CheckResults(Dict.count == 270,
-               "IncorrectResults in DictTest: \(Dict.count) != 270.")
+  CheckResults(Dict.count == 270)
 
   // Check performance of searching in the dictionary:
   // Fill the dictionary with words from the first half of the text
@@ -295,6 +295,5 @@ public func run_DictionaryOfObjects(scale: Int) {
       }
     }
   }
-  CheckResults(count == N*541,
-               "IncorrectResults in DictTestAllObjects: \(count) != \(N*541).")
+  CheckResults(count == N*541)
 }

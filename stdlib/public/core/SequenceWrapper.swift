@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 //
@@ -18,73 +18,118 @@
 /// A type that is just a wrapper over some base Sequence
 @_show_in_interface
 public // @testable
-protocol _SequenceWrapper {
-  associatedtype Base : Sequence
-  associatedtype Iterator : IteratorProtocol = Base.Iterator
+protocol _SequenceWrapper : Sequence {
+  associatedtype Base : Sequence where Base.Element == Element
+  associatedtype Iterator = Base.Iterator
+  associatedtype SubSequence = Base.SubSequence
   
   var _base: Base { get }
 }
 
-extension _SequenceWrapper where
-  Self : Sequence,
-  Self.Iterator == Self.Base.Iterator {
-
+extension _SequenceWrapper  {
+  @_inlineable // FIXME(sil-serialize-all)
   public var underestimatedCount: Int {
     return _base.underestimatedCount
   }
+
+  @_inlineable // FIXME(sil-serialize-all)
+  public func _preprocessingPass<R>(
+    _ preprocess: () throws -> R
+  ) rethrows -> R? {
+    return try _base._preprocessingPass(preprocess)
+  }
 }
 
-extension Sequence
-  where
-  Self : _SequenceWrapper,
-  Self.Iterator == Self.Base.Iterator {
-
-  /// Return an iterator over the elements of this sequence.
-  ///
-  /// - Complexity: O(1).
-  public func makeIterator() -> Base.Iterator {
+extension _SequenceWrapper where Iterator == Base.Iterator {
+  @_inlineable // FIXME(sil-serialize-all)
+  public func makeIterator() -> Iterator {
     return self._base.makeIterator()
   }
+  
+  @_inlineable // FIXME(sil-serialize-all)
+  @discardableResult
+  public func _copyContents(
+    initializing buf: UnsafeMutableBufferPointer<Element>
+  ) -> (Iterator, UnsafeMutableBufferPointer<Element>.Index) {
+    return _base._copyContents(initializing: buf)
+  }
+}
 
-  @warn_unused_result
+extension _SequenceWrapper {
+  @_inlineable // FIXME(sil-serialize-all)
   public func map<T>(
-    _ transform: @noescape (Base.Iterator.Element) throws -> T
-  ) rethrows -> [T] {
+    _ transform: (Element) throws -> T
+) rethrows -> [T] {
     return try _base.map(transform)
   }
-
-  @warn_unused_result
+  
+  @_inlineable // FIXME(sil-serialize-all)
   public func filter(
-    _ includeElement: @noescape (Base.Iterator.Element) throws -> Bool
-  ) rethrows -> [Base.Iterator.Element] {
-    return try _base.filter(includeElement)
+    _ isIncluded: (Element) throws -> Bool
+  ) rethrows -> [Element] {
+    return try _base.filter(isIncluded)
+  }
+
+  @_inlineable // FIXME(sil-serialize-all)
+  public func forEach(_ body: (Element) throws -> Void) rethrows {
+    return try _base.forEach(body)
   }
   
+  @_inlineable // FIXME(sil-serialize-all)
   public func _customContainsEquatableElement(
-    _ element: Base.Iterator.Element
+    _ element: Element
   ) -> Bool? { 
     return _base._customContainsEquatableElement(element)
   }
   
-  /// If `self` is multi-pass (i.e., a `Collection`), invoke
-  /// `preprocess` on `self` and return its result.  Otherwise, return
-  /// `nil`.
-  public func _preprocessingPass<R>(_ preprocess: @noescape () -> R) -> R? {
-    return _base._preprocessingPass(preprocess)
+  @_inlineable // FIXME(sil-serialize-all)
+  public func _copyToContiguousArray()
+    -> ContiguousArray<Element> {
+    return _base._copyToContiguousArray()
+  }
+}
+
+extension _SequenceWrapper where SubSequence == Base.SubSequence {
+  @_inlineable // FIXME(sil-serialize-all)
+  public func dropFirst(_ n: Int) -> SubSequence {
+    return _base.dropFirst(n)
+  }
+  @_inlineable // FIXME(sil-serialize-all)
+  public func dropLast(_ n: Int) -> SubSequence {
+    return _base.dropLast(n)
+  }
+  @_inlineable // FIXME(sil-serialize-all)
+  public func prefix(_ maxLength: Int) -> SubSequence {
+    return _base.prefix(maxLength)
+  }
+  @_inlineable // FIXME(sil-serialize-all)
+  public func suffix(_ maxLength: Int) -> SubSequence {
+    return _base.suffix(maxLength)
   }
 
-  /// Create a native array buffer containing the elements of `self`,
-  /// in the same order.
-  public func _copyToNativeArrayBuffer()
-    -> _ContiguousArrayBuffer<Base.Iterator.Element> {
-    return _base._copyToNativeArrayBuffer()
+  @_inlineable // FIXME(sil-serialize-all)
+  public func drop(
+    while predicate: (Element) throws -> Bool
+  ) rethrows -> SubSequence {
+    return try _base.drop(while: predicate)
   }
 
-  /// Copy a Sequence into an array, returning one past the last
-  /// element initialized.
-  public func _copyContents(
-    initializing ptr: UnsafeMutablePointer<Base.Iterator.Element>
-  ) -> UnsafeMutablePointer<Base.Iterator.Element> {
-    return _base._copyContents(initializing: ptr)
+  @_inlineable // FIXME(sil-serialize-all)
+  public func prefix(
+    while predicate: (Element) throws -> Bool
+  ) rethrows -> SubSequence {
+    return try _base.prefix(while: predicate)
+  }
+  
+  @_inlineable // FIXME(sil-serialize-all)
+  public func split(
+    maxSplits: Int, omittingEmptySubsequences: Bool,
+    whereSeparator isSeparator: (Element) throws -> Bool
+  ) rethrows -> [SubSequence] {
+    return try _base.split(
+      maxSplits: maxSplits,
+      omittingEmptySubsequences: omittingEmptySubsequences,
+      whereSeparator: isSeparator
+    )
   }
 }

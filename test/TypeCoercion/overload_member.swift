@@ -1,4 +1,4 @@
-// RUN: %target-parse-verify-swift
+// RUN: %target-typecheck-verify-swift
 
 struct X { }
 struct Y { }
@@ -79,7 +79,7 @@ func test_mixed_overload(_ a: A, x: X, y: Y) {
 }
 
 func test_mixed_overload_coerce(_ a: A, x: inout X, y: Y, z: Z) {
-  a.mixed2(z: z)
+  _ = a.mixed2(z: z)
   var y1 = A.mixed2(z: z)
   y1 = y
   _ = y1
@@ -89,7 +89,7 @@ func test_mixed_overload_coerce(_ a: A, x: inout X, y: Y, z: Z) {
 func test_mixed_method_value_coerce(_ a: A) {
   var _ : (X) -> X = a.mixed
   var _ : (Y) -> Y = A.mixed
-  var _ : (Y) -> Y = a.mixed; // expected-error{{cannot convert value of type '(x: X) -> X' to specified type '(Y) -> Y'}}
+  var _ : (Y) -> Y = a.mixed; // expected-error{{cannot convert value of type '(X) -> X' to specified type '(Y) -> Y'}}
   var _ : (A) -> (X) -> X = A.mixed
 }
 
@@ -124,14 +124,14 @@ extension A {
   }
 
   func test_mixed_overload_coerce(x: inout X, y: Y, z: Z) {
-    mixed2(z: z)
+    _ = mixed2(z: z)
     x = mixed2(z: z)
   }
 
   func test_mixed_method_value_coerce() {
     var _ : (X) -> X = mixed
-    var _ : (Y) -> Y = mixed; // expected-error{{cannot convert value of type '(x: X) -> X' to specified type '(Y) -> Y'}}
-    var _ : (Y) -> Y = mixed; // expected-error{{cannot convert value of type '(x: X) -> X' to specified type '(Y) -> Y'}}
+    var _ : (Y) -> Y = mixed; // expected-error{{cannot convert value of type '(X) -> X' to specified type '(Y) -> Y'}}
+    var _ : (Y) -> Y = mixed; // expected-error{{cannot convert value of type '(X) -> X' to specified type '(Y) -> Y'}}
     var _ : (A) -> (X) -> X = A.mixed
   }
 

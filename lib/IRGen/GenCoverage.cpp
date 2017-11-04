@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 //
@@ -23,7 +23,7 @@
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Type.h"
 #include "llvm/ProfileData/InstrProf.h"
-#include "llvm/ProfileData/CoverageMappingWriter.h"
+#include "llvm/ProfileData/Coverage/CoverageMappingWriter.h"
 #include "llvm/Support/FileSystem.h"
 
 using namespace swift;
@@ -32,20 +32,13 @@ using namespace irgen;
 using llvm::coverage::CovMapVersion;
 using llvm::coverage::CounterMappingRegion;
 
-static bool isMachO(IRGenModule &IGM) {
-  return SwiftTargetInfo::get(IGM).OutputObjectFormat == llvm::Triple::MachO;
-}
-
-static StringRef getCoverageSection(IRGenModule &IGM) {
-  return llvm::getInstrProfCoverageSectionName(isMachO(IGM));
-}
-
-static StringRef getProfNamesSection(IRGenModule &IGM) {
-  return llvm::getInstrProfNameSectionName(isMachO(IGM));
+static std::string getCoverageSection(IRGenModule &IGM) {
+  return llvm::getInstrProfSectionName(llvm::IPSK_covmap,
+                                       IGM.Triple.getObjectFormat());
 }
 
 void IRGenModule::emitCoverageMapping() {
-  const auto &Mappings = SILMod->getCoverageMapList();
+  const auto &Mappings = getSILModule().getCoverageMapList();
   // If there aren't any coverage maps, there's nothing to emit.
   if (Mappings.empty())
     return;
@@ -99,8 +92,9 @@ void IRGenModule::emitCoverageMapping() {
           MR.Counter, /*FileID=*/0, MR.StartLine, MR.StartCol, MR.EndLine,
           MR.EndCol));
     // Append each function's regions into the encoded buffer.
-    llvm::coverage::CoverageMappingWriter W({FileID}, M.getExpressions(),
-                                            Regions);
+    ArrayRef<unsigned> VirtualFileMapping(FileID);
+    llvm::coverage::CoverageMappingWriter W(VirtualFileMapping,
+                                            M.getExpressions(), Regions);
     W.write(OS);
 
     std::string NameValue = llvm::getPGOFuncName(
@@ -108,15 +102,8 @@ void IRGenModule::emitCoverageMapping() {
         M.isPossiblyUsedExternally() ? llvm::GlobalValue::ExternalLinkage
                                      : llvm::GlobalValue::PrivateLinkage,
         M.getFile());
-    llvm::GlobalVariable *NamePtr = llvm::createPGOFuncNameVar(
+    llvm::createPGOFuncNameVar(
         *getModule(), llvm::GlobalValue::LinkOnceAnyLinkage, NameValue);
-
-    // The instr-profiling pass in llvm typically sets the function name ptr's
-    // section. We do it here because (1) SIL's int_instrprof_increment does not
-    // use this exact GlobalVariable, so llvm misses it and (2) we shouldn't
-    // expose all name ptrs to llvm via the getCoverageUnusedNamesVarName() API.
-    NamePtr->setSection(getProfNamesSection(*this));
-    NamePtr->setAlignment(1);
 
     CurrentSize = OS.str().size();
     unsigned MappingLen = CurrentSize - PrevSize;
@@ -179,8 +166,8 @@ void IRGenModule::emitCoverageMapping() {
   auto CovData = new llvm::GlobalVariable(
       *getModule(), CovDataTy, true, llvm::GlobalValue::InternalLinkage,
       CovDataVal, llvm::getCoverageMappingVarName());
-  CovData->setSection(getCoverageSection(*this));
+  std::string CovSection = getCoverageSection(*this);
+  CovData->setSection(CovSection);
   CovData->setAlignment(8);
-
   addUsedGlobal(CovData);
 }

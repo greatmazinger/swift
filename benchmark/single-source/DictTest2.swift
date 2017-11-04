@@ -2,15 +2,20 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 
 import TestsUtils
+
+public let Dictionary2 = [
+  BenchmarkInfo(name: "Dictionary2", runFunction: run_Dictionary2, tags: [.validation, .api, .Dictionary]),
+  BenchmarkInfo(name: "Dictionary2OfObjects", runFunction: run_Dictionary2OfObjects, tags: [.validation, .api, .Dictionary]),
+]
 
 @inline(never)
 public func run_Dictionary2(_ N: Int) {
@@ -18,7 +23,7 @@ public func run_Dictionary2(_ N: Int) {
   let ref_result = 199
   var res = 0
   for _ in 1...5*N {
-    var x: [String:Int] = [:]
+    var x: [String: Int] = [:]
     for i in 1...size {
       x[String(i, radix:16)] = i
     }
@@ -34,30 +39,28 @@ public func run_Dictionary2(_ N: Int) {
       break
     }
   }
-  CheckResults(res == ref_result, "Incorrect results in Dictionary2: \(res) != \(ref_result)")
+  CheckResults(res == ref_result)
 }
 
-class Box<T : Hashable where T : Equatable> : Hashable {
+class Box<T : Hashable> : Hashable {
   var value: T
 
   init(_ v: T) {
     value = v
   }
 
-  var hashValue : Int {
+  var hashValue: Int {
     return value.hashValue
   }
-}
 
-extension Box : Equatable {
-}
-
-func ==<T: Equatable>(lhs: Box<T>, rhs: Box<T>) -> Bool {
-  return lhs.value == rhs.value
+  static func ==(lhs: Box, rhs: Box) -> Bool {
+    return lhs.value == rhs.value
+  }
 }
 
 @inline(never)
 public func run_Dictionary2OfObjects(_ N: Int) {
+
   let size = 500
   let ref_result = 199
   var res = 0
@@ -78,5 +81,5 @@ public func run_Dictionary2OfObjects(_ N: Int) {
       break
     }
   }
-  CheckResults(res == ref_result, "Incorrect results in Dictionary2AllObjects: \(res) != \(ref_result)")
+  CheckResults(res == ref_result)
 }

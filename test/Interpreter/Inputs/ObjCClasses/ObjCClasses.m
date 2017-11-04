@@ -1,5 +1,7 @@
-#include "ObjCClasses.h"
+#import "ObjCClasses.h"
+#import <Foundation/NSError.h>
 #include <stdio.h>
+#include <assert.h>
 
 @implementation HasHiddenIvars
 @synthesize x;
@@ -8,10 +10,30 @@
 @synthesize t;
 @end
 
-@implementation NilError
-+ (BOOL) throwIt: (NSError**) error {
+@implementation HasHiddenIvars2
+@synthesize x;
+@synthesize y;
+@synthesize z;
+@end
+
+@implementation TestingNSError
++ (BOOL)throwNilError:(NSError **)error {
   return 0;
 }
+
++ (nullable void *)maybeThrow:(BOOL)shouldThrow error:(NSError **)error {
+  if (shouldThrow) {
+    *error = [NSError errorWithDomain:@"pointer error" code:0 userInfo:nil];
+    return 0;
+  }
+  return (void *)42;
+}
+
++ (nullable void (^)(void))blockThrowError:(NSError **)error {
+  *error = [NSError errorWithDomain:@"block error" code:0 userInfo:nil];
+  return 0;
+}
+
 @end
 
 @implementation Container
@@ -108,3 +130,64 @@ static int _value = 0;
 
 #endif
 
+@implementation BridgedInitializer
+- (id) initWithArray: (NSArray*) array {
+  _objects = array;
+  return self;
+}
+- (NSInteger) count {
+  return _objects.count;
+}
+@end
+
+static unsigned counter = 0;
+
+@implementation NSLifetimeTracked
+
++ (id) allocWithZone:(NSZone *)zone {
+  counter++;
+  return [super allocWithZone:zone];
+}
+
+- (void) dealloc {
+  counter--;
+}
+
++ (unsigned) count {
+  return counter;
+}
+
+@end
+
+@implementation TestingBool
+
+- (void) shouldBeTrueObjCBool: (BOOL)value {
+  assert(value);
+}
+
+- (void) shouldBeTrueCBool: (_Bool)value {
+  assert(value);
+}
+
+@end
+
+@implementation OuterType
+
+- (id)init {
+  if ((self = [super init]) != nil) {
+  }
+  return self;
+}
+
+@end
+
+@implementation OuterTypeInnerType
+
+- (id)init {
+  if ((self = [super init]) != nil) {
+    self.things = [NSArray array];
+  }
+  return self;
+}
+
+@end

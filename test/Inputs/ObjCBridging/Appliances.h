@@ -12,3 +12,14 @@
 @interface APPHouse : NSObject
 @property (nonatomic,nonnull,copy) APPRefrigerator *fridge;
 @end
+
+
+@interface APPManufacturerInfo <DataType> : NSObject
+@property (nonatomic,nonnull,readonly) DataType value;
+@end
+
+@interface APPBroken : NSObject
+@property (nonatomic,nonnull,readonly) id thing;
+@end
+
+void takesNonStandardBlock(__attribute__((ns_returns_retained)) id (^)(void));

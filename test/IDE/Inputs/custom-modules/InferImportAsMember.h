@@ -49,6 +49,7 @@ extern void IAMStruct1SetNonPropertyNoSelf(double x, double y);
 
 // No set only properties
 extern void IAMStruct1SetNonPropertyNoGet(struct IAMStruct1 s, double x);
+extern void IAMStruct1SetNonPropertyExternalCollision(struct IAMStruct1 s, double x);
 
 /// Various static functions that can't quite be imported as properties.
 // Too many parameters
@@ -109,5 +110,7 @@ extern unsigned IAMClassGetTypeID(void);
 extern IAMClassRef IAMClassCreate(double i);
 extern void IAMClassInvert(IAMOtherName iamOtherName);
 
+// Test collision where we can see the getter, but not setter
+extern float IAMStruct1GetCollisionNonProperty(struct IAMStruct1, int);
 
 #endif // INFER_IMPORT_AS_MEMBER_H

@@ -1,17 +1,20 @@
-// RUN: %target-swift-frontend  %s -Onone  -emit-sil | FileCheck %s
+// RUN: %target-swift-frontend  %s -Onone -Xllvm -sil-inline-generics=false -emit-sil | %FileCheck %s
 
 // REQUIRES: optimized_stdlib
 
 // Check that pre-specialization works at -Onone.
 // This test requires the standard library to be compiled with pre-specializations!
 
-// CHECK-LABEL: sil [noinline] @_TF13prespecialize4testFTRGSaSi_4sizeSi_T_ 
-// Look for generic specialization <Swift.Int with Swift.Int : Swift.ForwardIndex in Swift, Swift.Int with Swift.Int : Swift._SignedInteger in Swift, Swift.Int with Swift.Int : Swift._BuiltinIntegerLiteralConvertible in Swift, Swift.Int> of Swift.Range.iterator <A where A: Swift.ForwardIndex> (Swift.Range<A>)() -> Swift.RangeIterator<A>
-// CHECK: function_ref @_TTSgq5SiSis12ForwardIndexs_SiSis14_SignedIntegers_SiSis33_BuiltinIntegerLiteralConvertibles_Si___TFVs5Range12makeIterator
-// Look for generic specialization <Swift.Int with Swift.Int : Swift.ForwardIndex in Swift, Swift.Int with Swift.Int : Swift._SignedInteger in Swift, Swift.Int with Swift.Int : Swift._BuiltinIntegerLiteralConvertible in Swift, Swift.Int> of Swift.RangeIterator.next <A where A: Swift.ForwardIndex> (inout Swift.RangeIterator<A>)() -> Swift.Optional<A>
-// CHECK: function_ref @_TTSgq5SiSis12ForwardIndexs_SiSis14_SignedIntegers_SiSis33_BuiltinIntegerLiteralConvertibles_Si___TFVs13RangeIterator4next
+// CHECK-LABEL: sil [noinline] @_T013prespecialize4testySaySiGz_Si4sizetF 
+//
+// function_ref specialized Collection<A where ...>.makeIterator() -> IndexingIterator<A>
+// CHECK: function_ref @_T0s10CollectionPss16IndexingIteratorVyxG0C0RtzrlE04makeC0AEyFs14CountableRangeVySiG_Tg5
+//
+// function_ref specialized IndexingIterator.next() -> A.Element?
+// CHECK: function_ref @_T0s16IndexingIteratorV4next7ElementQzSgyFs14CountableRangeVySiG_Tg5
+//
 // Look for generic specialization <Swift.Int> of Swift.Array.subscript.getter : (Swift.Int) -> A
-// CHECK: function_ref {{@_TTSgq5Si___TFSag9subscriptFSix|@_TTSg5Si___TFSaap9subscriptFSix}}
+// CHECK: function_ref {{@_T0SaxSicigSi_Tg5|@_TTSg5Si___TFSaap9subscriptFSix}}
 // CHECK: return
 @inline(never)
 public func test(_ a: inout [Int], size: Int) {
@@ -22,9 +25,9 @@ public func test(_ a: inout [Int], size: Int) {
   }
 }
 
-// CHECK-LABEL: sil [noinline] @_TF13prespecialize3runFT_T_
+// CHECK-LABEL: sil [noinline] @_T013prespecialize3runyyF
 // Look for generic specialization <Swift.Int> of Swift.Array.init (repeating : A, count : Swift.Int) -> Swift.Array<A>
-// CHECK: function_ref @_TTSgq5Si___TFSaCfT9repeatingx5countSi_GSax_
+// CHECK: function_ref @_T0S2ayxGx9repeating_Si5counttcfCSi_Tg5
 // CHECK: return
 @inline(never)
 public func run() {

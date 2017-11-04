@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 
@@ -14,106 +14,74 @@
 #define SWIFT_INDEX_INDEXSYMBOL_H
 
 #include "swift/Basic/LLVM.h"
+#include "clang/Index/IndexSymbol.h"
 #include "llvm/ADT/SmallString.h"
 
 namespace swift {
 class Decl;
+class ValueDecl;
+enum class AccessorKind;
 
 namespace index {
 
-enum class SymbolKind {
-  Unknown,
+using clang::index::SymbolKind;
+using clang::index::SymbolLanguage;
+using clang::index::SymbolSubKind;
+using clang::index::SymbolProperty;
+using clang::index::SymbolPropertySet;
+using clang::index::SymbolRole;
+using clang::index::SymbolRoleSet;
+using clang::index::SymbolRelation;
+using clang::index::SymbolInfo;
 
-  Module,
-  ClangModule, // FIXME: collapse into Module and use a separate Language field.
-  SourceFile,
+inline SymbolPropertySet operator&(SymbolPropertySet SKSet, SymbolProperty SK) {
+  return SKSet & (SymbolPropertySet)SK;
+}
+inline SymbolPropertySet operator|(SymbolPropertySet SKSet, SymbolProperty SK) {
+  return SKSet | (SymbolPropertySet)SK;
+}
+inline SymbolPropertySet &operator|=(SymbolPropertySet &SKSet, SymbolProperty SK) {
+  return SKSet = SKSet | SK;
+}
 
-  Enum,
-  Struct,
-  Class,
-  Protocol,
-  Extension,
+struct IndexRelation {
+  const Decl *decl;
+  SymbolInfo symInfo;
+  SymbolRoleSet roles = SymbolRoleSet(0);
 
-  TypeAlias,
-  AssociatedType,
-  GenericTypeParam,
-
-  Function,
-  PrefixOperator,
-  PostfixOperator,
-  InfixOperator,
-
-  LocalVariable,
-  GlobalVariable,
-  ParamVariable,
-
-  Accessor,
-  Subscript,
-  EnumElement,
-
-  InstanceMethod,
-  ClassMethod,
-  StaticMethod,
-  InstanceProperty,
-  ClassProperty,
-  StaticProperty,
-
-  Constructor,
-  Destructor,
-};
-
-enum class SymbolSubKind {
-  None,
-
-  AccessorGetter,
-  AccessorSetter,
-  AccessorWillSet,
-  AccessorDidSet,
-  AccessorMaterializeForSet,
-  AccessorAddressor,
-  AccessorMutableAddressor,
-
-  ExtensionOfStruct,
-  ExtensionOfClass,
-  ExtensionOfEnum,
-  ExtensionOfProtocol,
-};
-
-struct IndexSymbol {
-  enum TypeKind { Base, FuncDecl, CallReference };
-  TypeKind entityType = Base;
-
-  SymbolKind kind;
-  SymbolSubKind subKind = SymbolSubKind::None;
-  bool isRef;
   // The following strings are guaranteed to live at least as long as the
   // current indexing action.
   StringRef name;
   StringRef USR; // USR may be safely compared by pointer.
   StringRef group;
+
+  IndexRelation(SymbolRoleSet Roles, const Decl *Sym, SymbolInfo SymInfo, StringRef Name, StringRef USR)
+  : decl(Sym), symInfo(SymInfo), roles(Roles), name(Name), USR(USR) {}
+
+  IndexRelation() = default;
+};
+
+struct IndexSymbol : IndexRelation {
+  SmallVector<IndexRelation, 3> Relations;
   unsigned line = 0;
   unsigned column = 0;
 
   IndexSymbol() = default;
 
-protected:
-  IndexSymbol(TypeKind TK) : entityType(TK) {}
+  StringRef getReceiverUSR() const {
+    for (auto Relation: Relations) {
+      if (Relation.roles & (SymbolRoleSet) SymbolRole::RelationReceivedBy)
+        return Relation.USR;
+    }
+    return StringRef();
+  }
 };
 
-struct FuncDeclIndexSymbol : public IndexSymbol {
-  bool IsTestCandidate = false;
+SymbolInfo getSymbolInfoForDecl(const Decl *D);
+SymbolSubKind getSubKindForAccessor(AccessorKind AK);
+bool isLocalSymbol(const Decl *D);
 
-  FuncDeclIndexSymbol() : IndexSymbol(FuncDecl) {}
-};
-
-struct CallRefIndexSymbol : public IndexSymbol {
-  StringRef ReceiverUSR;
-  bool IsDynamic = false;
-
-  CallRefIndexSymbol() : IndexSymbol(CallReference) {}
-};
-
-SymbolKind getSymbolKindForDecl(const Decl *D);
+using clang::index::printSymbolProperties;
 
 } // end namespace index
 } // end namespace swift

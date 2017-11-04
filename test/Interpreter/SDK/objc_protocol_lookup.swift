@@ -1,5 +1,5 @@
 // Check JIT mode
-// RUN: %target-jit-run %s | FileCheck %s
+// RUN: %target-jit-run %s | %FileCheck %s
 
 // REQUIRES: swift_interpreter
 // REQUIRES: objc_interop
@@ -54,7 +54,7 @@ class Juice : NSObject {
 }
 
 @objc protocol Fruit {
-  optional var juice: Juice { get }
+  @objc optional var juice: Juice { get }
 }
 
 class Durian : NSObject, Fruit {

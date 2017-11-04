@@ -1,4 +1,4 @@
-// RUN: %target-parse-verify-swift
+// RUN: %target-typecheck-verify-swift
 
 // Inheritable: method with 'Self' in its signature
 protocol P1 {
@@ -43,7 +43,7 @@ protocol P8 {
 
 // Inheritable: operator requirement.
 protocol P9 {
-  func ==(x: Self, y: Self) -> Bool 
+  static func ==(x: Self, y: Self) -> Bool 
 }
 
 // Never inheritable: method with 'Self' in a non-contravariant position.
@@ -53,7 +53,7 @@ protocol P10 {
 
 // Never inheritable: method with 'Self' in curried position.
 protocol P11 {
-  func f11() -> (x: Self) -> Int
+  func f11() -> (_ x: Self) -> Int
 }
 
 // Inheritable: parameter is a function returning 'Self'.
@@ -63,13 +63,13 @@ protocol P12 {
 
 // Never inheritable: parameter is a function accepting 'Self'.
 protocol P13 {
-  func f13(_ s: Self -> ())
+  func f13(_ s: (Self) -> ())
 }
 
 // Inheritable: parameter is a function accepting a function
 // accepting 'Self'.
 protocol P14 {
-  func f14(_ s: (Self -> ()) -> ())
+  func f14(_ s: ((Self) -> ()) -> ())
 }
 
 // Never inheritable: parameter is a function accepting a function
@@ -119,7 +119,7 @@ class A : P1, P2, P3, P4, P5, P6, P7, P8, P9, P10 {
   func f10(_ arr: [A]) { } // expected-error{{protocol 'P10' requirement 'f10' cannot be satisfied by a non-final class ('A') because it uses 'Self' in a non-parameter, non-result type position}}
 
   // P11
-  func f11() -> (x: A) -> Int { return { x in 5 } }
+  func f11() -> (_ x: A) -> Int { return { x in 5 } }
 }
 
 // P9
@@ -206,7 +206,7 @@ final class A9 : P1, P2, P3, P4, P5, P6, P7, P8, P9, P10 {
   func f10(_ arr: [A9]) { }
 
   // P11
-  func f11() -> (x: A9) -> Int { return { x in 5 } }
+  func f11() -> (_ x: A9) -> Int { return { x in 5 } }
 }
 
 // P9
@@ -217,11 +217,11 @@ class A12 : P12 {
 }
 
 class A13 : P13 {
-  func f13(_ s: A13 -> ()) {} // expected-error{{protocol 'P13' requirement 'f13' cannot be satisfied by a non-final class ('A13') because it uses 'Self' in a non-parameter, non-result type position}}
+  func f13(_ s: (A13) -> ()) {} // expected-error{{protocol 'P13' requirement 'f13' cannot be satisfied by a non-final class ('A13') because it uses 'Self' in a non-parameter, non-result type position}}
 }
 
 class A14 : P14 {
-  func f14(_ s: (A14 -> ()) -> ()) {}
+  func f14(_ s: ((A14) -> ()) -> ()) {}
 }
 
 class A15 : P15 {

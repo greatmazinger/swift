@@ -1,5 +1,5 @@
 // RUN: %target-swift-ide-test -dump-importer-lookup-table -source-filename %s -import-objc-header %S/Inputs/swift_name.h -I %S/Inputs/custom-modules > %t.log 2>&1
-// RUN: FileCheck %s < %t.log
+// RUN: %FileCheck %s < %t.log
 
 // REQUIRES: objc_interop
 import ImportAsMember
@@ -20,17 +20,19 @@ import ImportAsMember
 // CHECK-NEXT:      Base name -> entry mappings:
 // CHECK-NEXT:    Bar:
 // CHECK-NEXT:      TU: SNFoo
-// CHECK-NEXT:    MyInt:
+// CHECK-NEXT:    Blue:
+// CHECK-NEXT:      SNColorChoice: SNColorBlue
+// CHECK:    MyInt:
 // CHECK-NEXT:      TU: SNIntegerType
 // CHECK-NEXT:    Point:
 // CHECK-NEXT:      TU: SNPoint
-// CHECK-NEXT:    Rouge:
+// CHECK:    Rouge:
 // CHECK-NEXT:      SNColorChoice: SNColorRed
-// CHECK-NEXT:    SNColorChoice:
+// CHECK:    SNColorChoice:
 // CHECK-NEXT:      TU: SNColorChoice, SNColorChoice
-// CHECK-NEXT:    SomeStruct:
-// CHECK-NEXT:      TU: SNSomeStruct
-// CHECK-NEXT:    __SNTransposeInPlace:
+// CHECK:    SomeStruct:
+// CHECK:      TU: SNSomeStruct
+// CHECK:    __SNTransposeInPlace:
 // CHECK-NEXT:      TU: SNTransposeInPlace
 // CHECK-NEXT:    __swift:
 // CHECK-NEXT:      TU: __swift

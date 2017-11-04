@@ -1,4 +1,4 @@
-// RUN: %target-parse-verify-swift
+// RUN: %target-typecheck-verify-swift
 
 func acceptInt(_ : inout Int) {}
 func acceptDouble(_ : inout Double) {}
@@ -12,14 +12,14 @@ acceptDouble(&i2)
 func ternary<T>(_ cond: Bool,
                 _ ifTrue: @autoclosure () -> T,
                 _ ifFalse: @autoclosure () -> T) -> T {}
-ternary(false, 1, 2.5)
-ternary(false, 2.5, 1)
+_ = ternary(false, 1, 2.5)
+_ = ternary(false, 2.5, 1)
 
 // <rdar://problem/18447543>
-ternary(false, 1, 2 as Int32)
-ternary(false, 1, 2 as Float)
+_ = ternary(false, 1, 2 as Int32)
+_ = ternary(false, 1, 2 as Float)
 
-func genericFloatingLiteral<T : FloatLiteralConvertible>(_ x: T) {
+func genericFloatingLiteral<T : ExpressibleByFloatLiteral>(_ x: T) {
   var _ : T = 2.5
 }
 
@@ -27,7 +27,7 @@ var d = 3.5
 genericFloatingLiteral(d)
 
 extension UInt32 {
-  func asChar() -> UnicodeScalar { return UnicodeScalar(self) }
+  func asChar() -> UnicodeScalar { return UnicodeScalar(self)! }
 }
 var ch = UInt32(65).asChar()
 

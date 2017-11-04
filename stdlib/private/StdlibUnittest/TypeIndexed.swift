@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 
@@ -52,16 +52,16 @@ public class TypeIndexed<Value> : Resettable {
   internal var defaultValue: Value
 }
 
-extension TypeIndexed where Value : ForwardIndex {
+extension TypeIndexed where Value : Strideable {
   public func expectIncrement<R>(
     _ t: Any.Type,
     _ message: @autoclosure () -> String = "",
     showFrame: Bool = true,
     stackTrace: SourceLocStack = SourceLocStack(),  
     file: String = #file, line: UInt = #line,
-    body: () -> R
+    invoking body: () -> R
   ) -> R {
-    let expected = self[t].successor()
+    let expected = self[t].advanced(by: 1)
     let r = body()
     expectEqual(
       expected, self[t], message(),
@@ -77,7 +77,7 @@ extension TypeIndexed where Value : Equatable {
     showFrame: Bool = true,
     stackTrace: SourceLocStack = SourceLocStack(),  
     file: String = #file, line: UInt = #line,
-    body: () -> R
+    invoking body: () -> R
   ) -> R {
     let expected = self[t]
     let r = body()

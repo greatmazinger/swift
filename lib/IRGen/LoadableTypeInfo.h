@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 //
@@ -21,9 +21,18 @@
 
 #include "FixedTypeInfo.h"
 
+namespace clang {
+namespace CodeGen {
+namespace swiftcall {
+  class SwiftAggLowering;
+}
+}
+}
+
 namespace swift {
 namespace irgen {
   class EnumPayload;
+  using clang::CodeGen::swiftcall::SwiftAggLowering;
 
 struct LoadedRef {
   llvm::PointerIntPair<llvm::Value*, 1> ValAndNonNull;
@@ -134,6 +143,15 @@ public:
   /// Return the loaded pointer value.
   virtual LoadedRef loadRefcountedPtr(IRGenFunction &IGF, SourceLoc loc,
                                       Address addr) const;
+
+  /// Add this type to the given aggregate lowering.
+  virtual void addToAggLowering(IRGenModule &IGM, SwiftAggLowering &lowering,
+                                Size offset) const = 0;
+
+  static void addScalarToAggLowering(IRGenModule &IGM,
+                                     SwiftAggLowering &lowering,
+                                     llvm::Type *type, Size offset,
+                                     Size storageSize);
 
   static bool classof(const LoadableTypeInfo *type) { return true; }
   static bool classof(const TypeInfo *type) { return type->isLoadable(); }

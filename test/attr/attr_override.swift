@@ -1,4 +1,4 @@
-// RUN: %target-parse-verify-swift
+// RUN: %target-typecheck-verify-swift
 
 @override // expected-error {{'override' can only be specified on class members}} {{1-11=}} expected-error {{'override' is a declaration modifier, not an attribute}} {{1-2=}}
 func virtualAttributeCanNotBeUsedInSource() {}
@@ -39,7 +39,7 @@ class A {
   var v8: Int = 0  // expected-note {{attempt to override property here}}
   var v9: Int { return 5 } // expected-note{{attempt to override property here}}
 
-  subscript (i: Int) -> String {
+  subscript (i: Int) -> String { // expected-note{{potential overridden subscript 'subscript' here}}
     get {
       return "hello"
     }
@@ -48,7 +48,7 @@ class A {
     }
   }
 
-  subscript (d: Double) -> String { // expected-note{{overridden declaration is here}}
+  subscript (d: Double) -> String { // expected-note{{overridden declaration is here}} expected-note{{potential overridden subscript 'subscript' here}}
     get {
       return "hello"
     }
@@ -57,11 +57,11 @@ class A {
     }
   }
 
-  subscript (i: Int8) -> A {
+  subscript (i: Int8) -> A { // expected-note{{potential overridden subscript 'subscript' here}}
     get { return self }
   }
 
-  subscript (i: Int16) -> A { // expected-note{{attempt to override subscript here}}
+  subscript (i: Int16) -> A { // expected-note{{attempt to override subscript here}} expected-note{{potential overridden subscript 'subscript' here}}
     get { return self }
     set { }
   }
@@ -138,7 +138,7 @@ class B : A {
 }
 
 extension B {
-  override func overriddenInExtension() {} // expected-error{{declarations in extensions cannot override yet}}
+  override func overriddenInExtension() {} // expected-error{{overriding declarations in extensions is not supported}}
 }
 
 struct S {
@@ -267,6 +267,7 @@ class MismatchOptionalBase {
 
   func functionParam(x: ((Int) -> Int)?) {}
   func tupleParam(x: (Int, Int)?) {}
+  func compositionParam(x: (P1 & P2)?) {}
 
   func nameAndTypeMismatch(label: Int?) {}
 
@@ -306,6 +307,9 @@ class MismatchOptionalBase {
   }
 }
 
+protocol P1 {}
+protocol P2 {}
+
 class MismatchOptional : MismatchOptionalBase {
   override func param(_: Int) {} // expected-error {{cannot override instance method parameter of type 'Int?' with non-optional type 'Int'}} {{29-29=?}}
   override func paramIUO(_: Int) {} // expected-error {{cannot override instance method parameter of type 'Int!' with non-optional type 'Int'}} {{32-32=?}}
@@ -316,11 +320,12 @@ class MismatchOptional : MismatchOptionalBase {
   // expected-error@-2 {{cannot override instance method parameter of type 'Int!' with non-optional type 'Int'}} {{47-47=?}}
   // expected-error@-3 {{cannot override instance method result type 'Int' with optional type 'Int!'}} {{55-56=}}
 
-  override func functionParam(x: (Int) -> Int) {} // expected-error {{cannot override instance method parameter of type '((Int) -> Int)?' with non-optional type '(Int) -> Int'}} {{34-34=(}} {{46-46=)?}}
+  override func functionParam(x: @escaping (Int) -> Int) {} // expected-error {{cannot override instance method parameter of type '((Int) -> Int)?' with non-optional type '(Int) -> Int'}} {{34-34=(}} {{56-56=)?}}
   override func tupleParam(x: (Int, Int)) {} // expected-error {{cannot override instance method parameter of type '(Int, Int)?' with non-optional type '(Int, Int)'}} {{41-41=?}}
+  override func compositionParam(x: P1 & P2) {} // expected-error {{cannot override instance method parameter of type '(P1 & P2)?' with non-optional type 'P1 & P2'}} {{37-37=(}} {{44-44=)?}}
 
   override func nameAndTypeMismatch(_: Int) {}
-  // expected-error@-1 {{argument names for method 'nameAndTypeMismatch' do not match those of overridden method 'nameAndTypeMismatch(label:)'}} {{37-37=label }}
+  // expected-error@-1 {{argument labels for method 'nameAndTypeMismatch' do not match those of overridden method 'nameAndTypeMismatch(label:)'}} {{37-37=label }}
   // expected-error@-2 {{cannot override instance method parameter of type 'Int?' with non-optional type 'Int'}} {{43-43=?}}
 
   override func ambiguousOverride(a: Int?, b: Int?) {} // expected-error {{declaration 'ambiguousOverride(a:b:)' cannot override more than one superclass declaration}} {{none}}
@@ -380,4 +385,55 @@ class MismatchOptional3 : MismatchOptionalBase {
   override func result() -> Optional<Int> { return nil } // expected-error {{cannot override instance method result type 'Int' with optional type 'Optional<Int>'}} {{none}}
 }
 
+// Make sure we remap the method's innermost generic parameters
+// to the correct depth
+class GenericBase<T> {
+  func doStuff<U>(t: T, u: U) {}
+  init<U>(t: T, u: U) {}
+}
 
+class ConcreteSub : GenericBase<Int> {
+  override func doStuff<U>(t: Int, u: U) {}
+  override init<U>(t: Int, u: U) {}
+}
+
+class ConcreteBase {
+  init<U>(t: Int, u: U) {}
+  func doStuff<U>(t: Int, u: U) {}
+
+}
+
+class GenericSub<T> : ConcreteBase {
+  override init<U>(t: Int, u: U) {}
+  override func doStuff<U>(t: Int, u: U) {}
+}
+
+// Issue with generic parameter index
+class MoreGenericSub1<T, TT> : GenericBase<T> {
+  override func doStuff<U>(t: T, u: U) {}
+}
+
+class MoreGenericSub2<TT, T> : GenericBase<T> {
+  override func doStuff<U>(t: T, u: U) {}
+}
+
+// Issue with insufficient canonicalization when
+// comparing types
+protocol SI {}
+protocol CI {}
+
+protocol Sequence {
+  associatedtype I : SI // expected-note{{declared here}}
+}
+
+protocol Collection : Sequence {
+  associatedtype I : CI // expected-warning{{redeclaration of associated type 'I'}}
+}
+
+class Index<F, T> {
+  func map(_ f: F) -> T {}
+}
+
+class CollectionIndex<C : Collection> : Index<C, C.I> {
+  override func map(_ f: C) -> C.I {}
+}

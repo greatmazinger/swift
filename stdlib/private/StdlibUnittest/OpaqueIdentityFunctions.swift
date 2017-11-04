@@ -2,29 +2,29 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 
-@_silgen_name("swift_stdlib_getPointer")
-func _stdlib_getPointer(_ x: OpaquePointer) -> OpaquePointer
+@_silgen_name("getPointer")
+func _getPointer(_ x: OpaquePointer) -> OpaquePointer
 
 public func _opaqueIdentity<T>(_ x: T) -> T {
-  let ptr = UnsafeMutablePointer<T>(allocatingCapacity: 1)
-  ptr.initialize(with: x)
+  let ptr = UnsafeMutablePointer<T>.allocate(capacity: 1)
+  ptr.initialize(to: x)
   let result =
-    UnsafeMutablePointer<T>(_stdlib_getPointer(OpaquePointer(ptr))).pointee
+    UnsafeMutablePointer<T>(_getPointer(OpaquePointer(ptr))).pointee
   ptr.deinitialize()
-  ptr.deallocateCapacity(1)
+  ptr.deallocate(capacity: 1)
   return result
 }
 
 func _blackHolePtr<T>(_ x: UnsafePointer<T>) {
-  _stdlib_getPointer(OpaquePointer(x))
+  _ = _getPointer(OpaquePointer(x))
 }
 
 public func _blackHole<T>(_ x: T) {

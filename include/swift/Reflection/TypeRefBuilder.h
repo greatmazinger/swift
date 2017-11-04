@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 //
@@ -19,6 +19,7 @@
 #define SWIFT_REFLECTION_TYPEREFBUILDER_H
 
 #include "swift/Remote/MetadataReader.h"
+#include "swift/Reflection/MetadataSourceBuilder.h"
 #include "swift/Reflection/Records.h"
 #include "swift/Reflection/TypeLowering.h"
 #include "swift/Reflection/TypeRef.h"
@@ -61,22 +62,56 @@ public:
   }
 
   size_t size() const {
-    return (char *)End - (char *)Begin;
+    return (const char *)End - (const char *)Begin;
   }
 };
 
 using FieldSection = ReflectionSection<FieldDescriptorIterator>;
 using AssociatedTypeSection = ReflectionSection<AssociatedTypeIterator>;
 using BuiltinTypeSection = ReflectionSection<BuiltinTypeDescriptorIterator>;
+using CaptureSection = ReflectionSection<CaptureDescriptorIterator>;
 using GenericSection = ReflectionSection<const void *>;
 
 struct ReflectionInfo {
-  std::string ImageName;
   FieldSection fieldmd;
   AssociatedTypeSection assocty;
   BuiltinTypeSection builtin;
+  CaptureSection capture;
   GenericSection typeref;
   GenericSection reflstr;
+  uintptr_t LocalStartAddress;
+  uintptr_t RemoteStartAddress;
+};
+
+struct ClosureContextInfo {
+  std::vector<const TypeRef *> CaptureTypes;
+  std::vector<std::pair<const TypeRef *, const MetadataSource *>> MetadataSources;
+  unsigned NumBindings = 0;
+
+  void dump() const;
+  void dump(std::ostream &OS) const;
+};
+
+struct FieldTypeInfo {
+  std::string Name;
+  const TypeRef *TR;
+  bool Indirect;
+
+  FieldTypeInfo() : Name(""), TR(nullptr), Indirect(false) {}
+  FieldTypeInfo(const std::string &Name, const TypeRef *TR, bool Indirect)
+      : Name(Name), TR(TR), Indirect(Indirect) {}
+
+  static FieldTypeInfo forEmptyCase(std::string Name) {
+    return FieldTypeInfo(Name, nullptr, false);
+  }
+
+  static FieldTypeInfo forIndirectCase(std::string Name, const TypeRef *TR) {
+    return FieldTypeInfo(Name, TR, true);
+  }
+
+  static FieldTypeInfo forField(std::string Name, const TypeRef *TR) {
+    return FieldTypeInfo(Name, TR, false);
+  }
 };
 
 /// An implementation of MetadataReader's BuilderType concept for
@@ -86,6 +121,9 @@ struct ReflectionInfo {
 /// Note that the TypeRefBuilder owns the memory for all TypeRefs
 /// it vends.
 class TypeRefBuilder {
+#define TYPEREF(Id, Parent) friend class Id##TypeRef;
+#include "swift/Reflection/TypeRefs.def"
+
 public:
   using BuiltType = const TypeRef *;
   using BuiltNominalTypeDecl = Optional<std::string>;
@@ -96,13 +134,28 @@ public:
   TypeRefBuilder &operator=(const TypeRefBuilder &other) = delete;
 
 private:
+  Demangle::Demangler Dem;
+
+  /// Makes sure dynamically allocated TypeRefs stick around for the life of
+  /// this TypeRefBuilder and are automatically released.
   std::vector<std::unique_ptr<const TypeRef>> TypeRefPool;
+
+  /// Cache for associated type lookups.
+  std::unordered_map<TypeRefID, const TypeRef *,
+                     TypeRefID::Hash, TypeRefID::Equal> AssociatedTypeCache;
+
   TypeConverter TC;
+  MetadataSourceBuilder MSB;
+
+#define TYPEREF(Id, Parent) \
+  std::unordered_map<TypeRefID, const Id##TypeRef *, \
+                     TypeRefID::Hash, TypeRefID::Equal> Id##TypeRefs;
+#include "swift/Reflection/TypeRefs.def"
 
 public:
   template <typename TypeRefTy, typename... Args>
-  TypeRefTy *makeTypeRef(Args... args) {
-    auto TR = new TypeRefTy(::std::forward<Args>(args)...);
+  const TypeRefTy *makeTypeRef(Args... args) {
+    const auto TR = new TypeRefTy(::std::forward<Args>(args)...);
     TypeRefPool.push_back(std::unique_ptr<const TypeRef>(TR));
     return TR;
   }
@@ -115,7 +168,8 @@ public:
     return BuiltinTypeRef::create(*this, mangledName);
   }
 
-  Optional<std::string> createNominalTypeDecl(const Demangle::NodePointer &node) {
+  Optional<std::string>
+  createNominalTypeDecl(const Demangle::NodePointer &node) {
     return Demangle::mangleNode(node);
   }
 
@@ -124,9 +178,20 @@ public:
   }
 
   const NominalTypeRef *createNominalType(
+                                    const Optional<std::string> &mangledName) {
+    return NominalTypeRef::create(*this, *mangledName, nullptr);
+  }
+
+  const NominalTypeRef *createNominalType(
                                     const Optional<std::string> &mangledName,
                                     const TypeRef *parent) {
     return NominalTypeRef::create(*this, *mangledName, parent);
+  }
+
+  const BoundGenericTypeRef *
+  createBoundGenericType(const Optional<std::string> &mangledName,
+                         const std::vector<const TypeRef *> &args) {
+    return BoundGenericTypeRef::create(*this, *mangledName, args, nullptr);
   }
 
   const BoundGenericTypeRef *
@@ -138,31 +203,36 @@ public:
 
   const TupleTypeRef *
   createTupleType(const std::vector<const TypeRef *> &elements,
-                  bool isVariadic) {
+                  std::string &&labels, bool isVariadic) {
+    // FIXME: Add uniqueness checks in TupleTypeRef::Profile and
+    // unittests/Reflection/TypeRef.cpp if using labels for identity.
     return TupleTypeRef::create(*this, elements, isVariadic);
   }
 
-  const FunctionTypeRef *
-  createFunctionType(const std::vector<const TypeRef *> &args,
-                     const std::vector<bool> &inOutArgs,
-                     const TypeRef *result,
-                     FunctionTypeFlags flags) {
-    // FIXME: don't ignore inOutArgs
-    return FunctionTypeRef::create(*this, args, result, flags);
+  const FunctionTypeRef *createFunctionType(
+      const std::vector<remote::FunctionParam<const TypeRef *>> &params,
+      const TypeRef *result, FunctionTypeFlags flags) {
+    return FunctionTypeRef::create(*this, params, result, flags);
   }
 
-  const ProtocolTypeRef *createProtocolType(const std::string &moduleName,
-                                      const std::string &protocolName) {
-    return ProtocolTypeRef::create(*this, moduleName, protocolName);
+  const ProtocolTypeRef *createProtocolType(const std::string &mangledName,
+                                            const std::string &moduleName,
+                                            const std::string &privateDiscriminator,
+                                            const std::string &name) {
+    return ProtocolTypeRef::create(*this, mangledName);
   }
 
   const ProtocolCompositionTypeRef *
-  createProtocolCompositionType(const std::vector<const TypeRef*> &protocols) {
-    for (auto protocol : protocols) {
-      if (!isa<ProtocolTypeRef>(protocol))
+  createProtocolCompositionType(const std::vector<const TypeRef*> &members,
+                                bool hasExplicitAnyObject) {
+    for (auto member : members) {
+      if (!isa<ProtocolTypeRef>(member) &&
+          !isa<NominalTypeRef>(member) &&
+          !isa<BoundGenericTypeRef>(member))
         return nullptr;
     }
-    return ProtocolCompositionTypeRef::create(*this, protocols);
+    return ProtocolCompositionTypeRef::create(*this, members,
+                                              hasExplicitAnyObject);
   }
 
   const ExistentialMetatypeTypeRef *
@@ -170,8 +240,9 @@ public:
     return ExistentialMetatypeTypeRef::create(*this, instance);
   }
 
-  const MetatypeTypeRef *createMetatypeType(const TypeRef *instance) {
-    return MetatypeTypeRef::create(*this, instance);
+  const MetatypeTypeRef *createMetatypeType(const TypeRef *instance,
+                                            bool WasAbstract = false) {
+    return MetatypeTypeRef::create(*this, instance, WasAbstract);
   }
 
   const GenericTypeParameterTypeRef *
@@ -201,12 +272,27 @@ public:
     return WeakStorageTypeRef::create(*this, base);
   }
 
-  const ObjCClassTypeRef *getUnnamedObjCClassType() {
-    return ObjCClassTypeRef::getUnnamed();
+  const SILBoxTypeRef *createSILBoxType(const TypeRef *base) {
+    return SILBoxTypeRef::create(*this, base);
   }
 
-  const ForeignClassTypeRef *getUnnamedForeignClassType() {
-    return ForeignClassTypeRef::getUnnamed();
+  const ObjCClassTypeRef *
+  createObjCClassType(const std::string &mangledName) {
+    return ObjCClassTypeRef::create(*this, mangledName);
+  }
+
+  const ObjCClassTypeRef *getUnnamedObjCClassType() {
+    return createObjCClassType("");
+  }
+
+  const ForeignClassTypeRef *
+  createForeignClassType(const std::string &mangledName) {
+    return ForeignClassTypeRef::create(*this, mangledName);
+  }
+
+  const ForeignClassTypeRef *
+  getUnnamedForeignClassType() {
+    return createForeignClassType("");
   }
 
   const OpaqueTypeRef *getOpaqueType() {
@@ -222,29 +308,35 @@ public:
   }
 
 private:
-
   std::vector<ReflectionInfo> ReflectionInfos;
-
-  const AssociatedTypeDescriptor *
-  lookupAssociatedTypes(const std::string &MangledTypeName,
-                        const DependentMemberTypeRef *DependentMember);
 
 public:
   TypeConverter &getTypeConverter() { return TC; }
 
   const TypeRef *
-  getDependentMemberTypeRef(const std::string &MangledTypeName,
-                            const DependentMemberTypeRef *DependentMember);
+  lookupTypeWitness(const std::string &MangledTypeName,
+                    const std::string &Member,
+                    const TypeRef *Protocol);
+
+  const TypeRef *
+  lookupSuperclass(const TypeRef *TR);
 
   /// Load unsubstituted field types for a nominal type.
   const FieldDescriptor *getFieldTypeInfo(const TypeRef *TR);
 
   /// Get the parsed and substituted field types for a nominal type.
-  std::vector<std::pair<std::string, const TypeRef *>>
-  getFieldTypeRefs(const TypeRef *TR, const FieldDescriptor *FD);
+  bool getFieldTypeRefs(const TypeRef *TR, const FieldDescriptor *FD,
+                        std::vector<FieldTypeInfo> &Fields);
 
   /// Get the primitive type lowering for a builtin type.
   const BuiltinTypeDescriptor *getBuiltinTypeInfo(const TypeRef *TR);
+
+  /// Get the raw capture descriptor for a remote capture descriptor
+  /// address.
+  const CaptureDescriptor *getCaptureDescriptor(uintptr_t RemoteAddress);
+
+  /// Get the unsubstituted capture types for a closure context.
+  ClosureContextInfo getClosureContextInfo(const CaptureDescriptor &CD);
 
   ///
   /// Dumping typerefs, field declarations, associated types
@@ -255,6 +347,7 @@ public:
   void dumpFieldSection(std::ostream &OS);
   void dumpAssociatedTypeSection(std::ostream &OS);
   void dumpBuiltinTypeSection(std::ostream &OS);
+  void dumpCaptureSection(std::ostream &OS);
   void dumpAllSections(std::ostream &OS);
 };
 

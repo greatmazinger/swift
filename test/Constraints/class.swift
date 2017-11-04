@@ -1,4 +1,4 @@
-// RUN: %target-parse-verify-swift
+// RUN: %target-typecheck-verify-swift
 
 class A { }
 class B : A { }
@@ -28,7 +28,7 @@ f0(fi)
 
 // FIXME: Test subtyping of class metatypes.
 
-ternary(true, ef, c)
+_ = ternary(true, ef, c)
 
 
 class X {

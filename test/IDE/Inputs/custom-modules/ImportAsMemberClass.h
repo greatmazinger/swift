@@ -19,4 +19,28 @@ __attribute__((swift_name("SomeClass.applyOptions(self:_:)")))
 void IAMSomeClassApplyOptions(IAMSomeClass * _Nonnull someClass, 
                               IAMSomeClassOptions options);
 
+@interface UnavailableDefaultInit : NSObject
+-(instancetype)init __attribute__((availability(swift,unavailable)));
+@end
+
+@interface UnavailableDefaultInitSub : UnavailableDefaultInit
+@end
+
+__attribute__((swift_name("UnavailableDefaultInit.init()")))
+UnavailableDefaultInit * _Nonnull MakeUnavailableDefaultInit(void);
+
+__attribute__((swift_name("UnavailableDefaultInitSub.init()")))
+UnavailableDefaultInitSub * _Nonnull MakeUnavailableDefaultInitSub(void);
+
+#pragma clang assume_nonnull begin
+
+extern NSString * PKPandaCutenessFactor __attribute__((swift_name("Panda.cutenessFactor")));
+extern NSString * _Nullable PKPandaCuddlynessFactor __attribute__((swift_name("Panda.cuddlynessFactor")));
+
+__attribute__((swift_name("Panda")))
+@interface PKPanda : NSObject
+@end
+
+#pragma clang assume_nonnull end
+
 #endif

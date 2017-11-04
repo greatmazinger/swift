@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 
@@ -60,37 +60,30 @@ public:
 
   void
   visitClosureBindingMetadataSource(const ClosureBindingMetadataSource *CB) {
-    printHeader("closure-binding");
+    printHeader("closure_binding");
     printField("index", CB->getIndex());
     closeForm();
   }
 
   void
   visitReferenceCaptureMetadataSource(const ReferenceCaptureMetadataSource *RC){
-    printHeader("reference-capture");
+    printHeader("reference_capture");
     printField("index", RC->getIndex());
     closeForm();
   }
 
   void
   visitMetadataCaptureMetadataSource(const MetadataCaptureMetadataSource *MC){
-    printHeader("metadata-capture");
+    printHeader("metadata_capture");
     printField("index", MC->getIndex());
     closeForm();
   }
 
   void
   visitGenericArgumentMetadataSource(const GenericArgumentMetadataSource *GA) {
-    printHeader("generic-argument");
+    printHeader("generic_argument");
     printField("index", GA->getIndex());
     printRec(GA->getSource());
-    closeForm();
-  }
-
-  void
-  visitParentMetadataSource(const ParentMetadataSource *P) {
-    printHeader("parent-of");
-    printRec(P->getChild());
     closeForm();
   }
 
@@ -101,7 +94,7 @@ public:
 
   void
   visitSelfWitnessTableMetadataSource(const SelfWitnessTableMetadataSource *W) {
-    printHeader("self-witness-table");
+    printHeader("self_witness_table");
     closeForm();
   }
 };
@@ -112,5 +105,5 @@ void MetadataSource::dump() const {
 
 void MetadataSource::dump(std::ostream &OS, unsigned Indent) const {
   PrintMetadataSource(OS, Indent).visit(this);
-  OS << std::endl;
+  OS << '\n';
 }

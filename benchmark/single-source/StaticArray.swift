@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 //
@@ -15,6 +15,11 @@
 //===----------------------------------------------------------------------===//
 
 import TestsUtils
+
+public let StaticArrayTest = BenchmarkInfo(
+  name: "StaticArray",
+  runFunction: run_StaticArray,
+  tags: [.validation, .api, .Array])
 
 protocol StaticArrayProtocol {
   associatedtype ElemTy
@@ -41,7 +46,11 @@ struct A2X<T : StaticArrayProtocol> : StaticArrayProtocol {
   func count() -> Int { return upper.count() + lower.count() }
 }
 
-struct StaticArray<T : StaticArrayProtocol> : StaticArrayProtocol, MutableCollection {
+struct StaticArray<
+  T : StaticArrayProtocol
+> : StaticArrayProtocol, RandomAccessCollection, MutableCollection {
+  typealias Indices = CountableRange<Int>
+  
   init(_ defaultValue : T.ElemTy) { values = T(defaultValue) }
   var values : T
   func get(_ idx: Int) -> T.ElemTy { return values.get(idx) }
@@ -49,6 +58,7 @@ struct StaticArray<T : StaticArrayProtocol> : StaticArrayProtocol, MutableCollec
   func count() -> Int { return values.count() }
 
   typealias Index = Int
+  typealias IndexDistance = Int
   let startIndex: Int = 0
   var endIndex: Int { return count()}
 
@@ -62,6 +72,11 @@ struct StaticArray<T : StaticArrayProtocol> : StaticArrayProtocol, MutableCollec
   }
 
   typealias Iterator = IndexingIterator<StaticArray>
+
+  subscript(bounds: Range<Index>) -> StaticArray<T> {
+    get { fatalError() }
+    set { fatalError() }
+  }
 }
 
 typealias SA2Int   = StaticArray<A0<Int>>

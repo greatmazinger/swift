@@ -8,7 +8,7 @@ add_subdirectory(SILCombiner)
 add_subdirectory(Transforms)
 add_subdirectory(UtilityPasses)
 add_subdirectory(Utils)
-add_swift_library(swiftSILOptimizer
+add_swift_library(swiftSILOptimizer STATIC
   ${ARC_SOURCES}
   ${ANALYSIS_SOURCES}
   ${SILCOMBINER_SOURCES}
@@ -19,4 +19,5 @@ add_swift_library(swiftSILOptimizer
   ${MANDATORY_SOURCES}
   ${TRANSFORMS_SOURCES}
   ${IPO_SOURCES}
+  DEPENDS swift-syntax-generated-headers
   LINK_LIBRARIES swiftSIL)

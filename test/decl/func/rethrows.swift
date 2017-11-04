@@ -1,11 +1,11 @@
-// RUN: %target-parse-verify-swift
+// RUN: %target-swift-frontend -typecheck -verify -module-name main %s
 
 /** Basics *******************************************************************/
 
 // Function types can't be rethrows right now.
-let r1 = {() rethrows -> Int in 0} // expected-error {{only function declarations may be marked 'rethrows'}}
-let r2 : () rethrows -> Int = { 0 } // expected-error {{only function declarations may be marked 'rethrows'}}
-let r3 : Optional<() rethrows -> ()> = nil // expected-error {{only function declarations may be marked 'rethrows'}}
+let r1 = {() rethrows -> Int in 0} // expected-error {{only function declarations may be marked 'rethrows'; did you mean 'throws'?}} {{14-22=throws}}
+let r2 : () rethrows -> Int = { 0 } // expected-error {{only function declarations may be marked 'rethrows'; did you mean 'throws'?}} {{13-21=throws}}
+let r3 : Optional<() rethrows -> ()> = nil // expected-error {{only function declarations may be marked 'rethrows'; did you mean 'throws'?}} {{22-30=throws}}
 
 func f1(_ f: () throws -> ()) rethrows { try f() }
 func f2(_ f: () -> ()) rethrows { f() } // expected-error {{'rethrows' function must take a throwing function argument}}
@@ -89,9 +89,13 @@ class C3 : Super {
 
 /** Semantics ****************************************************************/
 
+@discardableResult
 func call(_ fn: () throws -> Int) rethrows -> Int { return try fn() }
+@discardableResult
 func callAC(_ fn: @autoclosure () throws -> Int) rethrows -> Int { return try fn() }
+@discardableResult
 func raise() throws -> Int { return 0 }
+@discardableResult
 func noraise() -> Int { return 0 }
 
 /** Global functions **/
@@ -116,6 +120,9 @@ func testCallACUnhandled() {
   callAC(raise()) // expected-error {{call can throw but is not marked with 'try'}} \
                   // expected-error {{call can throw, but it is not marked with 'try' and the error is not handled}} \
                   // expected-note {{call is to 'rethrows' function, but argument function can throw}}
+		  // expected-note@-3 {{did you mean to use 'try'?}} {{10-10=try }}
+		  // expected-note@-4 {{did you mean to handle error as optional value?}} {{10-10=try? }}
+		  // expected-note@-5 {{did you mean to disable error propagation?}} {{10-10=try! }}
   try callAC(raise()) // expected-error {{call can throw, but the error is not handled}} expected-note {{call is to 'rethrows' function, but argument function can throw}}
 }
 
@@ -123,6 +130,9 @@ func testCallACHandled() throws {
   callAC(noraise())
   try callAC(noraise()) // expected-warning {{no calls to throwing functions occur within 'try'}}
   callAC(raise()) // expected-error 2 {{call can throw but is not marked with 'try'}} expected-note {{call is to 'rethrows' function, but argument function can throw}}
+		  // expected-note@-1 {{did you mean to use 'try'?}} {{10-10=try }}
+		  // expected-note@-2 {{did you mean to handle error as optional value?}} {{10-10=try? }}
+		  // expected-note@-3 {{did you mean to disable error propagation?}} {{10-10=try! }}
   try callAC(raise())
 }
 
@@ -136,10 +146,14 @@ func testForward2(_ fn: () throws -> Int) rethrows {
 /** Methods **/
 
 struct MyStruct : MyProto {
+  @discardableResult
   func call(_ fn: () throws -> Int) rethrows -> Int { return try fn() }
+  @discardableResult
   func callAC(_ fn: @autoclosure () throws -> Int) rethrows -> Int { return try fn() }
 
+  @discardableResult
   static func static_call(_ fn: () throws -> Int) rethrows -> Int { return try fn() }
+  @discardableResult
   static func static_callAC(_ fn: @autoclosure () throws -> Int) rethrows -> Int { return try fn() }
 }
 
@@ -173,6 +187,9 @@ func testMethodCallACUnhandled(_ s: MyStruct) {
   s.callAC(raise()) // expected-error {{call can throw but is not marked with 'try'}} \
                   // expected-error {{call can throw, but it is not marked with 'try' and the error is not handled}} \
                   // expected-note {{call is to 'rethrows' function, but argument function can throw}}
+		  // expected-note@-3 {{did you mean to use 'try'?}} {{12-12=try }}
+		  // expected-note@-4 {{did you mean to handle error as optional value?}} {{12-12=try? }}
+		  // expected-note@-5 {{did you mean to disable error propagation?}} {{12-12=try! }}
   try s.callAC(raise()) // expected-error {{call can throw, but the error is not handled}} expected-note {{call is to 'rethrows' function, but argument function can throw}}
 
   MyStruct.static_callAC(noraise())
@@ -180,6 +197,9 @@ func testMethodCallACUnhandled(_ s: MyStruct) {
   MyStruct.static_callAC(raise()) // expected-error {{call can throw but is not marked with 'try'}} \
                   // expected-error {{call can throw, but it is not marked with 'try' and the error is not handled}} \
                   // expected-note {{call is to 'rethrows' function, but argument function can throw}}
+                  // expected-note@-3 {{did you mean to use 'try'?}} {{26-26=try }}
+                  // expected-note@-4 {{did you mean to handle error as optional value?}} {{26-26=try? }}
+                  // expected-note@-5 {{did you mean to disable error propagation?}} {{26-26=try! }}
   try MyStruct.static_callAC(raise()) // expected-error {{call can throw, but the error is not handled}} expected-note {{call is to 'rethrows' function, but argument function can throw}}
 }
 
@@ -187,21 +207,32 @@ func testMethodCallACHandled(_ s: MyStruct) throws {
   s.callAC(noraise())
   try s.callAC(noraise()) // expected-warning {{no calls to throwing functions occur within 'try'}}
   s.callAC(raise()) // expected-error 2 {{call can throw but is not marked with 'try'}} expected-note {{call is to 'rethrows' function, but argument function can throw}}
+                    // expected-note@-1 {{did you mean to use 'try'?}} {{12-12=try }}
+                    // expected-note@-2 {{did you mean to handle error as optional value?}} {{12-12=try? }}
+                    // expected-note@-3 {{did you mean to disable error propagation?}} {{12-12=try! }}
   try s.callAC(raise())
 
   MyStruct.static_callAC(noraise())
   try MyStruct.static_callAC(noraise()) // expected-warning {{no calls to throwing functions occur within 'try'}}
   MyStruct.static_callAC(raise()) // expected-error 2 {{call can throw but is not marked with 'try'}} expected-note {{call is to 'rethrows' function, but argument function can throw}}
+                                  // expected-note@-1 {{did you mean to use 'try'?}} {{26-26=try }}
+                                  // expected-note@-2 {{did you mean to handle error as optional value?}} {{26-26=try? }}
+                                  // expected-note@-3 {{did you mean to disable error propagation?}} {{26-26=try! }}
+
   try MyStruct.static_callAC(raise())
 }
 
 /** Protocol methods **/
 
 protocol MyProto {
+  @discardableResult
   func call(_ fn: () throws -> Int) rethrows -> Int
+  @discardableResult
   func callAC(_ fn: @autoclosure () throws -> Int) rethrows -> Int
 
+  @discardableResult
   static func static_call(_ fn: () throws -> Int) rethrows -> Int
+  @discardableResult
   static func static_callAC(_ fn: @autoclosure () throws -> Int) rethrows -> Int
 }
 
@@ -213,10 +244,10 @@ func testProtoMethodCallUnhandled(_ s: MyProto) {
   s.call(raise) // expected-error {{call can throw, but it is not marked with 'try' and the error is not handled}} expected-note {{call is to 'rethrows' function, but argument function can throw}}
   try s.call(raise) // expected-error {{call can throw, but the error is not handled}} expected-note {{call is to 'rethrows' function, but argument function can throw}}
 
-  s.dynamicType.static_call(noraise)
-  try s.dynamicType.static_call(noraise) // expected-warning {{no calls to throwing functions occur within 'try'}}
-  s.dynamicType.static_call(raise) // expected-error {{call can throw, but it is not marked with 'try' and the error is not handled}} expected-note {{call is to 'rethrows' function, but argument function can throw}}
-  try s.dynamicType.static_call(raise) // expected-error {{call can throw, but the error is not handled}} expected-note {{call is to 'rethrows' function, but argument function can throw}}
+  type(of: s).static_call(noraise)
+  try type(of: s).static_call(noraise) // expected-warning {{no calls to throwing functions occur within 'try'}}
+  type(of: s).static_call(raise) // expected-error {{call can throw, but it is not marked with 'try' and the error is not handled}} expected-note {{call is to 'rethrows' function, but argument function can throw}}
+  try type(of: s).static_call(raise) // expected-error {{call can throw, but the error is not handled}} expected-note {{call is to 'rethrows' function, but argument function can throw}}
 }
 
 func testProtoMethodCallHandled(_ s: MyProto) throws {
@@ -225,38 +256,51 @@ func testProtoMethodCallHandled(_ s: MyProto) throws {
   s.call(raise) // expected-error {{call can throw but is not marked with 'try'}} expected-note {{call is to 'rethrows' function, but argument function can throw}}
   try s.call(raise)
 
-  s.dynamicType.static_call(noraise)
-  try s.dynamicType.static_call(noraise) // expected-warning {{no calls to throwing functions occur within 'try'}}
-  s.dynamicType.static_call(raise) // expected-error {{call can throw but is not marked with 'try'}} expected-note {{call is to 'rethrows' function, but argument function can throw}}
-  try s.dynamicType.static_call(raise)
+  type(of: s).static_call(noraise)
+  try type(of: s).static_call(noraise) // expected-warning {{no calls to throwing functions occur within 'try'}}
+  type(of: s).static_call(raise) // expected-error {{call can throw but is not marked with 'try'}} expected-note {{call is to 'rethrows' function, but argument function can throw}}
+  try type(of: s).static_call(raise)
 }
 
 func testProtoMethodCallACUnhandled(_ s: MyProto) {
   s.callAC(noraise())
   try s.callAC(noraise()) // expected-warning {{no calls to throwing functions occur within 'try'}}
   s.callAC(raise()) // expected-error {{call can throw but is not marked with 'try'}} \
-                  // expected-error {{call can throw, but it is not marked with 'try' and the error is not handled}} \
-                  // expected-note {{call is to 'rethrows' function, but argument function can throw}}
+                    // expected-error {{call can throw, but it is not marked with 'try' and the error is not handled}} \
+                    // expected-note {{call is to 'rethrows' function, but argument function can throw}}
+                    // expected-note@-3 {{did you mean to use 'try'?}} {{12-12=try }}
+                    // expected-note@-4 {{did you mean to handle error as optional value?}} {{12-12=try? }}
+                    // expected-note@-5 {{did you mean to disable error propagation?}} {{12-12=try! }}
   try s.callAC(raise()) // expected-error {{call can throw, but the error is not handled}} expected-note {{call is to 'rethrows' function, but argument function can throw}}
 
-  s.dynamicType.static_callAC(noraise())
-  try s.dynamicType.static_callAC(noraise()) // expected-warning {{no calls to throwing functions occur within 'try'}}
-  s.dynamicType.static_callAC(raise()) // expected-error {{call can throw but is not marked with 'try'}} \
+  type(of: s).static_callAC(noraise())
+  try type(of: s).static_callAC(noraise()) // expected-warning {{no calls to throwing functions occur within 'try'}}
+  type(of: s).static_callAC(raise()) // expected-error {{call can throw but is not marked with 'try'}} \
                   // expected-error {{call can throw, but it is not marked with 'try' and the error is not handled}} \
                   // expected-note {{call is to 'rethrows' function, but argument function can throw}}
-  try s.dynamicType.static_callAC(raise()) // expected-error {{call can throw, but the error is not handled}} expected-note {{call is to 'rethrows' function, but argument function can throw}}
+                  // expected-note@-3 {{did you mean to use 'try'?}} {{29-29=try }}
+		  // expected-note@-4 {{did you mean to handle error as optional value?}} {{29-29=try? }}
+		  // expected-note@-5 {{did you mean to disable error propagation?}} {{29-29=try! }}
+  try type(of: s).static_callAC(raise()) // expected-error {{call can throw, but the error is not handled}} expected-note {{call is to 'rethrows' function, but argument function can throw}}
 }
 
 func testProtoMethodCallACHandled(_ s: MyProto) throws {
   s.callAC(noraise())
   try s.callAC(noraise()) // expected-warning {{no calls to throwing functions occur within 'try'}}
   s.callAC(raise()) // expected-error 2 {{call can throw but is not marked with 'try'}} expected-note {{call is to 'rethrows' function, but argument function can throw}}
+                    // expected-note@-1 {{did you mean to use 'try'?}} {{12-12=try }}
+                    // expected-note@-2 {{did you mean to handle error as optional value?}} {{12-12=try? }}
+                    // expected-note@-3 {{did you mean to disable error propagation?}} {{12-12=try! }}
+
   try s.callAC(raise())
 
-  s.dynamicType.static_callAC(noraise())
-  try s.dynamicType.static_callAC(noraise()) // expected-warning {{no calls to throwing functions occur within 'try'}}
-  s.dynamicType.static_callAC(raise()) // expected-error 2 {{call can throw but is not marked with 'try'}} expected-note {{call is to 'rethrows' function, but argument function can throw}}
-  try s.dynamicType.static_callAC(raise())
+  type(of: s).static_callAC(noraise())
+  try type(of: s).static_callAC(noraise()) // expected-warning {{no calls to throwing functions occur within 'try'}}
+  type(of: s).static_callAC(raise()) // expected-error 2 {{call can throw but is not marked with 'try'}} expected-note {{call is to 'rethrows' function, but argument function can throw}}
+                                     // expected-note@-1 {{did you mean to use 'try'?}} {{29-29=try }}
+                                     // expected-note@-2 {{did you mean to handle error as optional value?}} {{29-29=try? }}
+                                     // expected-note@-3 {{did you mean to disable error propagation?}} {{29-29=try! }}
+  try type(of: s).static_callAC(raise())
 }
 
 /** Generics **/
@@ -291,6 +335,9 @@ func testGenericMethodCallACUnhandled<P: MyProto>(_ s: P) {
   s.callAC(raise()) // expected-error {{call can throw but is not marked with 'try'}} \
                   // expected-error {{call can throw, but it is not marked with 'try' and the error is not handled}} \
                   // expected-note {{call is to 'rethrows' function, but argument function can throw}}
+                  // expected-note@-3 {{did you mean to use 'try'?}} {{12-12=try }}
+                  // expected-note@-4 {{did you mean to handle error as optional value?}} {{12-12=try? }}
+                  // expected-note@-5 {{did you mean to disable error propagation?}} {{12-12=try! }}
   try s.callAC(raise()) // expected-error {{call can throw, but the error is not handled}} expected-note {{call is to 'rethrows' function, but argument function can throw}}
 
   P.static_callAC(noraise())
@@ -298,6 +345,9 @@ func testGenericMethodCallACUnhandled<P: MyProto>(_ s: P) {
   P.static_callAC(raise()) // expected-error {{call can throw but is not marked with 'try'}} \
                   // expected-error {{call can throw, but it is not marked with 'try' and the error is not handled}} \
                   // expected-note {{call is to 'rethrows' function, but argument function can throw}}
+                  // expected-note@-3 {{did you mean to use 'try'?}} {{19-19=try }}
+                  // expected-note@-4 {{did you mean to handle error as optional value?}} {{19-19=try? }}
+                  // expected-note@-5 {{did you mean to disable error propagation?}} {{19-19=try! }}
   try P.static_callAC(raise()) // expected-error {{call can throw, but the error is not handled}} expected-note {{call is to 'rethrows' function, but argument function can throw}}
 }
 
@@ -305,11 +355,17 @@ func testGenericMethodCallACHandled<P: MyProto>(_ s: P) throws {
   s.callAC(noraise())
   try s.callAC(noraise()) // expected-warning {{no calls to throwing functions occur within 'try'}}
   s.callAC(raise()) // expected-error 2 {{call can throw but is not marked with 'try'}} expected-note {{call is to 'rethrows' function, but argument function can throw}}
+                    // expected-note@-1 {{did you mean to use 'try'?}} {{12-12=try }}
+                    // expected-note@-2 {{did you mean to handle error as optional value?}} {{12-12=try? }}
+                    // expected-note@-3 {{did you mean to disable error propagation?}} {{12-12=try! }}
   try s.callAC(raise())
 
   P.static_callAC(noraise())
   try P.static_callAC(noraise()) // expected-warning {{no calls to throwing functions occur within 'try'}}
   P.static_callAC(raise()) // expected-error 2 {{call can throw but is not marked with 'try'}} expected-note {{call is to 'rethrows' function, but argument function can throw}}
+                           // expected-note@-1 {{did you mean to use 'try'?}} {{19-19=try }}
+		           // expected-note@-2 {{did you mean to handle error as optional value?}} {{19-19=try? }}
+                           // expected-note@-3 {{did you mean to disable error propagation?}} {{19-19=try! }}
   try P.static_callAC(raise())
 }
 
@@ -345,14 +401,14 @@ testImplicitlyUnwrappedFunctionParameter(nil)
 /** Miscellaneous bugs **/
 
 // rdar://problem/21967164 - Non-throwing closures are incorrectly marked as throwing in rethrow contexts
-func rt1(predicate: @noescape () throws -> ()) rethrows { }
+func rt1(predicate: () throws -> ()) rethrows { }
 rt1 { }
 
 func rt2(_ predicate: () throws -> ()) rethrows { }
 rt2 { }
 
 
-enum SomeError : ErrorProtocol {
+enum SomeError : Error {
   case Badness
 }
 
@@ -442,3 +498,40 @@ class r24221830 : B24221830 {
   
 }
 
+// rdar://problem/30618853
+
+func gallant(_: () throws -> ()) rethrows {}
+
+func goofus(_ f: () -> ()) {
+  gallant(f)
+  main.gallant(f)
+}
+
+func goofus(_ f: () throws -> ()) rethrows {
+  try gallant(f)
+  try main.gallant(f)
+}
+
+struct Foo {
+  func foo() {}
+}
+
+func throwWhileGettingFoo() throws -> Foo.Type { return Foo.self }
+
+(throwWhileGettingFoo()).foo(Foo())() // expected-error {{can throw}}
+				      // expected-note@-1 {{did you mean to use 'try'?}} {{2-2=try }}
+		                      // expected-note@-2 {{did you mean to handle error as optional value?}} {{2-2=try? }}
+                                      // expected-note@-3 {{did you mean to disable error propagation?}} {{2-2=try! }}
+(try throwWhileGettingFoo()).foo(Foo())()
+
+// <rdar://problem/31794932> [Source compatibility] Call to sort(by):) can throw, but is not marked with 'try'
+func doRethrow(fn: (Int, Int) throws -> Int) rethrows { }
+
+struct DoRethrowGeneric<T> {
+  func method(fn: (T, T) throws -> T) rethrows { }
+}
+
+func testDoRethrow() {
+  doRethrow(fn:) { (a, b) in return a }
+  DoRethrowGeneric<Int>().method(fn:) { (a, b) in return a }
+}

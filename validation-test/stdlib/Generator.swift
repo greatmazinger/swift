@@ -14,7 +14,7 @@ tests.test("Range") {
   var maybe_one = w.next()
   expectType(Optional<Int>.self, &maybe_one)
   expectEqual(1, maybe_one)
-  expectEmpty(w.next())
+  expectNil(w.next())
 }
 
 tests.test("RangeIteratorConformsToSequence") {
@@ -27,11 +27,12 @@ tests.test("RangeIteratorConformsToSequence") {
 tests.test("IteratorSequence") {
   var r = 1..<7
   var x = MinimalIterator(Array(r))
+  var rangeIndex = r.lowerBound
   for a in IteratorSequence(x) {
-    expectEqual(r.startIndex, a)
-    r.startIndex = r.startIndex.successor()
+    expectEqual(rangeIndex, a)
+    rangeIndex = r.index(after: rangeIndex)
   }
-  expectEqual(r.startIndex, r.endIndex)
+  expectEqual(rangeIndex, r.upperBound)
 }
 
 struct MyIterator : IteratorProtocol {

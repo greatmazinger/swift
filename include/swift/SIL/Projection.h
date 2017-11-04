@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 ///
@@ -61,6 +61,8 @@ inline bool isStrictSubSeqRelation(SubSeqRelation_t Seq) {
   case SubSeqRelation_t::RHSStrictSubSeqOfLHS:
     return true;
   }
+
+  llvm_unreachable("Unhandled SubSeqRelation_t in switch.");
 }
 
 /// Extract an integer index from a SILValue.
@@ -91,8 +93,9 @@ enum class ProjectionKind : unsigned {
   Upcast = 0,
   RefCast = 1,
   BitwiseCast = 2,
+  TailElems = 3,
   FirstPointerKind = Upcast,
-  LastPointerKind = BitwiseCast,
+  LastPointerKind = TailElems,
 
   // Index Projection Kinds
   FirstIndexKind = 7,
@@ -124,6 +127,7 @@ static inline bool isCastProjectionKind(ProjectionKind Kind) {
   case ProjectionKind::Class:
   case ProjectionKind::Enum:
   case ProjectionKind::Box:
+  case ProjectionKind::TailElems:
     return false;
   }
 }
@@ -155,6 +159,12 @@ struct ProjectionIndex {
     case ValueKind::RefElementAddrInst: {
       RefElementAddrInst *REA = cast<RefElementAddrInst>(V);
       Index = REA->getFieldNo();
+      Aggregate = REA->getOperand();
+      break;
+    }
+    case ValueKind::RefTailAddrInst: {
+      RefTailAddrInst *REA = cast<RefTailAddrInst>(V);
+      Index = 0;
       Aggregate = REA->getOperand();
       break;
     }
@@ -218,8 +228,10 @@ public:
   Projection() = delete;
 
   explicit Projection(SILValue V)
-      : Projection(dyn_cast<SILInstruction>(V)) {}
-  explicit Projection(SILInstruction *I);
+      : Projection(dyn_cast<SingleValueInstruction>(V)) {}
+  explicit Projection(SILInstruction *I)
+      : Projection(dyn_cast<SingleValueInstruction>(I)) {}
+  explicit Projection(SingleValueInstruction *I);
 
   Projection(ProjectionKind Kind, unsigned NewIndex)
       : Value(Kind, NewIndex) {}
@@ -245,7 +257,7 @@ public:
 
   /// Determine if I is a value projection instruction whose corresponding
   /// projection equals this projection.
-  bool matchesObjectProjection(SILInstruction *I) const {
+  bool matchesObjectProjection(SingleValueInstruction *I) const {
     Projection P(I);
     return P.isValid() && P == *this;
   }
@@ -254,17 +266,17 @@ public:
   /// type differences and this Projection is representable as a value
   /// projection, create the relevant value projection and return it. Otherwise,
   /// return nullptr.
-  NullablePtr<SILInstruction>
+  NullablePtr<SingleValueInstruction>
   createObjectProjection(SILBuilder &B, SILLocation Loc, SILValue Base) const;
 
   /// If Base's type matches this Projections type ignoring Address vs Object
   /// type differences and this projection is representable as an address
   /// projection, create the relevant address projection and return
   /// it. Otherwise, return nullptr.
-  NullablePtr<SILInstruction>
+  NullablePtr<SingleValueInstruction>
   createAddressProjection(SILBuilder &B, SILLocation Loc, SILValue Base) const;
 
-  NullablePtr<SILInstruction>
+  NullablePtr<SingleValueInstruction>
   createProjection(SILBuilder &B, SILLocation Loc, SILValue Base) const {
     if (Base->getType().isAddress()) {
       return createAddressProjection(B, Loc, Base);
@@ -286,18 +298,20 @@ public:
     case ProjectionKind::Enum:
       return BaseType.getEnumElementType(getEnumElementDecl(BaseType), M);
     case ProjectionKind::Box:
-      return SILType::getPrimitiveAddressType(BaseType.castTo<SILBoxType>()->
-                                              getBoxedType());
+      return BaseType.castTo<SILBoxType>()->getFieldType(M, getIndex());
     case ProjectionKind::Tuple:
       return BaseType.getTupleElementType(getIndex());
     case ProjectionKind::Upcast:
     case ProjectionKind::RefCast:
     case ProjectionKind::BitwiseCast:
+    case ProjectionKind::TailElems:
       return getCastType(BaseType);
     case ProjectionKind::Index:
       // Index types do not change the underlying type.
       return BaseType;
     }
+
+    llvm_unreachable("Unhandled ProjectionKind in switch.");
   }
 
   VarDecl *getVarDecl(SILType BaseType) const {
@@ -323,13 +337,19 @@ public:
 
   SILType getCastType(SILType BaseType) const {
     assert(isValid());
-    assert(getKind() == ProjectionKind::Upcast ||
-           getKind() == ProjectionKind::RefCast ||
-           getKind() == ProjectionKind::BitwiseCast);
     auto *Ty = getPointer();
     assert(Ty->isCanonical());
-    return SILType::getPrimitiveType(Ty->getCanonicalType(),
-                                     BaseType.getCategory());
+    switch (getKind()) {
+      case ProjectionKind::Upcast:
+      case ProjectionKind::RefCast:
+      case ProjectionKind::BitwiseCast:
+        return SILType::getPrimitiveType(Ty->getCanonicalType(),
+                                         BaseType.getCategory());
+      case ProjectionKind::TailElems:
+        return SILType::getPrimitiveAddressType(Ty->getCanonicalType());
+      default:
+        llvm_unreachable("unknown cast projection type");
+    }
   }
 
   bool operator<(const Projection &Other) const;
@@ -352,40 +372,45 @@ public:
 
   /// Returns true if this instruction projects from an address type to an
   /// address subtype.
-  static bool isAddressProjection(SILValue V) {
+  static SingleValueInstruction *isAddressProjection(SILValue V) {
     switch (V->getKind()) {
     default:
-      return false;
+      return nullptr;
     case ValueKind::IndexAddrInst: {
+      auto I = cast<IndexAddrInst>(V);
       unsigned Scalar;
-      return getIntegerIndex(cast<IndexAddrInst>(V)->getIndex(), Scalar);
+      if (getIntegerIndex(I->getIndex(), Scalar))
+        return I;
+      return nullptr;
     }
     case ValueKind::StructElementAddrInst:
     case ValueKind::RefElementAddrInst:
+    case ValueKind::RefTailAddrInst:
     case ValueKind::ProjectBoxInst:
     case ValueKind::TupleElementAddrInst:
     case ValueKind::UncheckedTakeEnumDataAddrInst:
-      return true;
+      return cast<SingleValueInstruction>(V);
     }
   }
 
   /// Returns true if this instruction projects from an object type to an object
   /// subtype.
-  static bool isObjectProjection(SILValue V) {
+  static SingleValueInstruction *isObjectProjection(SILValue V) {
     switch (V->getKind()) {
     default:
-      return false;
+      return nullptr;
     case ValueKind::StructExtractInst:
     case ValueKind::TupleExtractInst:
     case ValueKind::UncheckedEnumDataInst:
-      return true;
+      return cast<SingleValueInstruction>(V);
     }
   }
 
   /// Returns true if this instruction projects from an object type into an
   /// address subtype.
   static bool isObjectToAddressProjection(SILValue V) {
-    return isa<RefElementAddrInst>(V) || isa<ProjectBoxInst>(V);
+    return isa<RefElementAddrInst>(V) || isa<RefTailAddrInst>(V) ||
+           isa<ProjectBoxInst>(V);
   }
 
   /// Given a specific SILType, return all first level projections if it is an
@@ -410,10 +435,13 @@ public:
     case ProjectionKind::Tuple:
     case ProjectionKind::Index:
     case ProjectionKind::Class:
+    case ProjectionKind::TailElems:
     case ProjectionKind::Enum:
     case ProjectionKind::Box:
       return false;
     }
+
+    llvm_unreachable("Unhandled ProjectionKind in switch.");
   }
 
   bool isNominalKind() const {
@@ -428,8 +456,11 @@ public:
     case ProjectionKind::Tuple:
     case ProjectionKind::Upcast:
     case ProjectionKind::Box:
+    case ProjectionKind::TailElems:
       return false;
     }
+
+    llvm_unreachable("Unhandled ProjectionKind in switch.");
   }
 
   /// Form an aggregate of type BaseType using the SILValue Values. Returns the
@@ -439,7 +470,7 @@ public:
   /// This can be used with getFirstLevelProjections to project out/reform
   /// values. We do not need to use the original projections here since to build
   /// aggregate instructions the order is the only important thing.
-  static NullablePtr<SILInstruction>
+  static NullablePtr<SingleValueInstruction>
   createAggFromFirstLevelProjections(SILBuilder &B, SILLocation Loc,
                                      SILType BaseType,
                                      llvm::SmallVectorImpl<SILValue> &Values);
@@ -655,9 +686,7 @@ public:
   void verify(SILModule &M);
 
   raw_ostream &print(raw_ostream &OS, SILModule &M);
-  raw_ostream &printProjections(raw_ostream &OS, SILModule &M) const;
   void dump(SILModule &M);
-  void dumpProjections(SILModule &M) const;
 };
 
 /// Returns the hashcode for the new projection path.
@@ -730,11 +759,6 @@ class ProjectionTreeNode {
       Initialized(false), IsLive(false) {}
 
 public:
-  enum LivenessKind : unsigned {
-    NormalUseLiveness = 0,
-    IgnoreEpilogueReleases = 1,
-  };
-
   class NewAggregateBuilder;
 
   ~ProjectionTreeNode() = default;
@@ -769,12 +793,10 @@ public:
   ProjectionTreeNode *getChildForProjection(ProjectionTree &Tree,
                                                const Projection &P);
 
-  NullablePtr<SILInstruction> createProjection(SILBuilder &B, SILLocation Loc,
-                                               SILValue Arg) const;
+  NullablePtr<SingleValueInstruction>
+  createProjection(SILBuilder &B, SILLocation Loc, SILValue Arg) const;
 
-  std::string getNameEncoding(const ProjectionTree &PT) const;
-
-  SILInstruction *
+  SingleValueInstruction *
   createAggregate(SILBuilder &B, SILLocation Loc,
                   ArrayRef<SILValue> Args) const;
 
@@ -799,8 +821,7 @@ private:
 
   void processUsersOfValue(ProjectionTree &Tree,
                            llvm::SmallVectorImpl<ValueNodePair> &Worklist,
-                           SILValue Value, ProjectionTreeNode::LivenessKind Kind,
-                           llvm::DenseSet<SILInstruction *> &Releases);
+                           SILValue Value);
 
   void createNextLevelChildren(ProjectionTree &Tree);
 
@@ -814,12 +835,8 @@ class ProjectionTree {
 
   SILModule &Mod;
 
-  llvm::BumpPtrAllocator &Allocator;
-
-  /// The way we compute what is live and what is dead.
-  ProjectionTreeNode::LivenessKind Kind;
-
-  llvm::DenseSet<SILInstruction *> EpilogueReleases;
+  /// The allocator we use to allocate ProjectionTreeNodes in the tree.
+  llvm::SpecificBumpPtrAllocator<ProjectionTreeNode> Allocator;
 
   // A common pattern is a 3 field struct.
   llvm::SmallVector<ProjectionTreeNode *, 4> ProjectionTreeNodes;
@@ -829,15 +846,10 @@ class ProjectionTree {
 
 public:
   /// Construct a projection tree from BaseTy.
-  ProjectionTree(SILModule &Mod, llvm::BumpPtrAllocator &Allocator,
-                 SILType BaseTy);
-  ProjectionTree(SILModule &Mod, llvm::BumpPtrAllocator &Allocator,
-                 SILType BaseTy, ProjectionTreeNode::LivenessKind Kind, 
-                 llvm::DenseSet<SILInstruction*> Insts);
+  ProjectionTree(SILModule &Mod, SILType BaseTy);
   /// Construct an uninitialized projection tree, which can then be
   /// initialized by initializeWithExistingTree.
-  ProjectionTree(SILModule &Mod, llvm::BumpPtrAllocator &Allocator) 
-    : Mod(Mod), Allocator(Allocator) {}
+  ProjectionTree(SILModule &Mod) : Mod(Mod) {}
   ~ProjectionTree();
   ProjectionTree(const ProjectionTree &) = delete;
   ProjectionTree(ProjectionTree &&) = default;
@@ -847,13 +859,6 @@ public:
   /// Compute liveness and use information in this projection tree using Base.
   /// All debug instructions (debug_value, debug_value_addr) are ignored.
   void computeUsesAndLiveness(SILValue Base);
-
-  /// Return a name encoding of the projection tree.
-  std::string getNameEncoding() const; 
-
-  /// Initialize an empty projection tree with an existing, computed projection
-  /// tree.
-  void initializeWithExistingTree(const ProjectionTree &PT);
 
   /// Create a root SILValue iout of the given leaf node values by walking on
   /// the projection tree.
@@ -894,6 +899,9 @@ public:
   bool isSingleton() const {
     // If we only have one root node, there is no interesting explosion
     // here. Exit early.
+    //
+    // NOTE: In case of a type unable to be exploded, e.g. enum, we treated it
+    // as a singleton.
     if (ProjectionTreeNodes.size() == 1)
       return true;
 
@@ -950,7 +958,7 @@ private:
   void createRoot(SILType BaseTy) {
     assert(ProjectionTreeNodes.empty() &&
            "Should only create root when ProjectionTreeNodes is empty");
-    auto *Node = new (Allocator) ProjectionTreeNode(BaseTy);
+    auto *Node = new (Allocator.Allocate()) ProjectionTreeNode(BaseTy);
     ProjectionTreeNodes.push_back(Node);
   }
 
@@ -958,7 +966,8 @@ private:
                                      SILType BaseTy,
                                      const Projection &P) {
     unsigned Index = ProjectionTreeNodes.size();
-    auto *Node = new (Allocator) ProjectionTreeNode(Parent, Index, BaseTy, P);
+    auto *Node = new (Allocator.Allocate()) ProjectionTreeNode(Parent, Index,
+                                                               BaseTy, P);
     ProjectionTreeNodes.push_back(Node);
     return ProjectionTreeNodes[Index];
   }

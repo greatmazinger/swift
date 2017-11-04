@@ -1,14 +1,14 @@
-// RUN: %target-parse-verify-swift
+// RUN: %target-typecheck-verify-swift
 
-enum MSV : ErrorProtocol {
+enum MSV : Error {
   case Foo, Bar, Baz
   case CarriesInt(Int)
 
-  var domain: String { return "" }
-  var code: Int { return 0 }
+  var _domain: String { return "" }
+  var _code: Int { return 0 }
 }
 
-func opaque_error() -> ErrorProtocol { return MSV.Foo }
+func opaque_error() -> Error { return MSV.Foo }
 
 func one() {
   do {
@@ -37,7 +37,7 @@ func one() {
 
   do {
     throw opaque_error()
-  } catch is ErrorProtocol {  // expected-warning {{'is' test is always true}}
+  } catch is Error {  // expected-warning {{'is' test is always true}}
   }
   
   func foo() throws {}
@@ -80,6 +80,9 @@ func testAutoclosures() throws {
   try takesThrowingAutoclosure(genNoError()) // expected-warning {{no calls to throwing functions occur within 'try' expression}}
 
   takesThrowingAutoclosure(genError()) // expected-error {{call can throw but is not marked with 'try'}}
+                                       // expected-note@-1 {{did you mean to use 'try'?}} {{28-28=try }}
+                                       // expected-note@-2 {{did you mean to handle error as optional value?}} {{28-28=try? }}
+                                       // expected-note@-3 {{did you mean to disable error propagation?}} {{28-28=try! }}
   takesThrowingAutoclosure(genNoError())
 }
 
@@ -90,7 +93,7 @@ struct IllegalContext {
 
   func catcher() throws {
     do {
-      try genError()
+      _ = try genError()
     } catch MSV.CarriesInt(genError()) { // expected-error {{call can throw, but errors cannot be thrown out of a catch pattern}}
     } catch MSV.CarriesInt(let i) where i == genError() { // expected-error {{call can throw, but errors cannot be thrown out of a catch guard expression}}
     }
@@ -99,10 +102,9 @@ struct IllegalContext {
 
 func illformed() throws {
     do {
-      try genError()
+      _ = try genError()
 
-    // TODO: this recovery is terrible
-    } catch MSV.CarriesInt(let i) where i == genError()) { // expected-error {{call can throw, but errors cannot be thrown out of a catch guard expression}} expected-error {{expected '{'}} expected-error {{braced block of statements is an unused closure}} expected-error {{expression resolves to an unused function}}
+    } catch MSV.CarriesInt(let i) where i == genError()) { // expected-error {{call can throw, but errors cannot be thrown out of a catch guard expression}} expected-error {{expected '{'}}
     }
 }
 
@@ -110,8 +112,23 @@ func postThrows() -> Int throws { // expected-error{{'throws' may only occur bef
   return 5
 }
 
+func postThrows2() -> throws Int { // expected-error{{'throws' may only occur before '->'}}{{20-22=throws}}{{23-29=->}}
+  return try postThrows()
+}
+
 func postRethrows(_ f: () throws -> Int) -> Int rethrows { // expected-error{{'rethrows' may only occur before '->'}}{{42-42=rethrows }}{{48-57=}}
   return try f()
+}
+
+func postRethrows2(_ f: () throws -> Int) -> rethrows Int { // expected-error{{'rethrows' may only occur before '->'}}{{43-45=rethrows}}{{46-54=->}}
+  return try f()
+}
+
+func incompleteThrowType() {
+  // FIXME: Bad recovery for incomplete function type.
+  let _: () throws
+  // expected-error @-1 {{consecutive statements on a line must be separated by ';'}}
+  // expected-error @-2 {{expected expression}}
 }
 
 // rdar://21328447
@@ -120,5 +137,5 @@ func fixitThrow1() throw -> Int {} // expected-error{{expected throwing specifie
 func fixitThrow2() throws {
   var _: (Int)
   throw MSV.Foo
-  var _: Int throw -> Int // expected-error{{expected throwing specifier; did you mean 'throws'?}} {{14-19=throws}}
+  var _: (Int) throw -> Int // expected-error{{expected throwing specifier; did you mean 'throws'?}} {{16-21=throws}}
 }

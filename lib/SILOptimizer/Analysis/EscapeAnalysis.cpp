@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 
@@ -16,56 +16,79 @@
 #include "swift/SILOptimizer/Analysis/ArraySemantic.h"
 #include "swift/SILOptimizer/Analysis/ValueTracking.h"
 #include "swift/SILOptimizer/PassManager/PassManager.h"
+#include "swift/SILOptimizer/Utils/Local.h"
 #include "swift/SIL/SILArgument.h"
+#include "swift/SIL/DebugUtils.h"
 #include "llvm/Support/GraphWriter.h"
 #include "llvm/Support/raw_ostream.h"
 
 using namespace swift;
 
-static bool isProjection(ValueBase *V) {
-  switch (V->getKind()) {
-    case ValueKind::IndexAddrInst:
-    case ValueKind::IndexRawPointerInst:
-    case ValueKind::StructElementAddrInst:
-    case ValueKind::TupleElementAddrInst:
-    case ValueKind::UncheckedTakeEnumDataAddrInst:
-    case ValueKind::StructExtractInst:
-    case ValueKind::TupleExtractInst:
-    case ValueKind::UncheckedEnumDataInst:
-    case ValueKind::MarkDependenceInst:
-    case ValueKind::PointerToAddressInst:
-    case ValueKind::AddressToPointerInst:
-    case ValueKind::InitEnumDataAddrInst:
-      return true;
-    default:
-      return false;
+static bool isExtractOfArrayUninitializedPointer(TupleExtractInst *TEI) {
+  if (TEI->getFieldNo() == 1) {
+    if (auto apply = dyn_cast<ApplyInst>(TEI->getOperand()))
+      if (ArraySemanticsCall(apply, "array.uninitialized", false))
+        return true;
+  }
+  return false;
+}
+
+static SingleValueInstruction *isProjection(SILNode *node) {
+  switch (node->getKind()) {
+  case SILNodeKind::IndexAddrInst:
+  case SILNodeKind::IndexRawPointerInst:
+  case SILNodeKind::StructElementAddrInst:
+  case SILNodeKind::TupleElementAddrInst:
+  case SILNodeKind::UncheckedTakeEnumDataAddrInst:
+  case SILNodeKind::StructExtractInst:
+  case SILNodeKind::UncheckedEnumDataInst:
+  case SILNodeKind::MarkDependenceInst:
+  case SILNodeKind::PointerToAddressInst:
+  case SILNodeKind::AddressToPointerInst:
+  case SILNodeKind::InitEnumDataAddrInst:
+    return cast<SingleValueInstruction>(node);
+  case SILNodeKind::TupleExtractInst: {
+    auto *TEI = cast<TupleExtractInst>(node);
+    // Special handling for extracting the pointer-result from an
+    // array construction. We handle this like a ref_element_addr
+    // rather than a projection. See the handling of tuple_extract
+    // in analyzeInstruction().
+    if (isExtractOfArrayUninitializedPointer(TEI))
+      return nullptr;
+    return TEI;
+  }
+  default:
+    return nullptr;
   }
 }
 
-static bool isNonWritableMemoryAddress(ValueBase *V) {
+static bool isNonWritableMemoryAddress(SILNode *V) {
   switch (V->getKind()) {
-    case ValueKind::FunctionRefInst:
-    case ValueKind::WitnessMethodInst:
-    case ValueKind::ClassMethodInst:
-    case ValueKind::SuperMethodInst:
-    case ValueKind::DynamicMethodInst:
-    case ValueKind::StringLiteralInst:
-    case ValueKind::ThinToThickFunctionInst:
-    case ValueKind::ThinFunctionToPointerInst:
-    case ValueKind::PointerToThinFunctionInst:
-      // These instructions return pointers to memory which can't be a
-      // destination of a store.
-      return true;
-    default:
-      return false;
+  case SILNodeKind::FunctionRefInst:
+  case SILNodeKind::WitnessMethodInst:
+  case SILNodeKind::ClassMethodInst:
+  case SILNodeKind::SuperMethodInst:
+  case SILNodeKind::ObjCMethodInst:
+  case SILNodeKind::ObjCSuperMethodInst:
+  case SILNodeKind::StringLiteralInst:
+  case SILNodeKind::ThinToThickFunctionInst:
+  case SILNodeKind::ThinFunctionToPointerInst:
+  case SILNodeKind::PointerToThinFunctionInst:
+    // These instructions return pointers to memory which can't be a
+    // destination of a store.
+    return true;
+  default:
+    return false;
   }
 }
 
 static ValueBase *skipProjections(ValueBase *V) {
   for (;;) {
-    if (!isProjection(V))
+    if (auto SVI = isProjection(V)) {
+      V = SVI->getOperand(0);
+    } else {
       return V;
-    V = cast<SILInstruction>(V)->getOperand(0);
+    }
   }
   llvm_unreachable("there is no escape from an infinite loop");
 }
@@ -75,6 +98,7 @@ void EscapeAnalysis::ConnectionGraph::clear() {
   Nodes.clear();
   ReturnNode = nullptr;
   UsePoints.clear();
+  UsePointTable.clear();
   NodeAllocator.DestroyAll();
   assert(ToMerge.empty());
 }
@@ -82,9 +106,6 @@ void EscapeAnalysis::ConnectionGraph::clear() {
 EscapeAnalysis::CGNode *EscapeAnalysis::ConnectionGraph::
 getNode(ValueBase *V, EscapeAnalysis *EA, bool createIfNeeded) {
   if (isa<FunctionRefInst>(V))
-    return nullptr;
-  
-  if (!V->hasValue())
     return nullptr;
   
   if (!EA->isPointer(V))
@@ -97,14 +118,10 @@ getNode(ValueBase *V, EscapeAnalysis *EA, bool createIfNeeded) {
   
   CGNode * &Node = Values2Nodes[V];
   if (!Node) {
-    if (SILArgument *Arg = dyn_cast<SILArgument>(V)) {
-      if (Arg->isFunctionArg()) {
-        Node = allocNode(V, NodeType::Argument);
-        if (!isSummaryGraph)
-          Node->mergeEscapeState(EscapeState::Arguments);
-      } else {
-        Node = allocNode(V, NodeType::Value);
-      }
+    if (isa<SILFunctionArgument>(V)) {
+      Node = allocNode(V, NodeType::Argument);
+      if (!isSummaryGraph)
+        Node->mergeEscapeState(EscapeState::Arguments);
     } else {
       Node = allocNode(V, NodeType::Value);
     }
@@ -374,7 +391,7 @@ void EscapeAnalysis::ConnectionGraph::propagateEscapeStates() {
 void EscapeAnalysis::ConnectionGraph::computeUsePoints() {
   // First scan the whole function and add relevant instructions as use-points.
   for (auto &BB : *F) {
-    for (SILArgument *BBArg : BB.getBBArgs()) {
+    for (SILArgument *BBArg : BB.getArguments()) {
       /// In addition to releasing instructions (see below) we also add block
       /// arguments as use points. In case of loops, block arguments can
       /// "extend" the liferange of a reference in upward direction.
@@ -385,11 +402,11 @@ void EscapeAnalysis::ConnectionGraph::computeUsePoints() {
 
     for (auto &I : BB) {
       switch (I.getKind()) {
-        case ValueKind::StrongReleaseInst:
-        case ValueKind::ReleaseValueInst:
-        case ValueKind::UnownedReleaseInst:
-        case ValueKind::ApplyInst:
-        case ValueKind::TryApplyInst: {
+        case SILInstructionKind::StrongReleaseInst:
+        case SILInstructionKind::ReleaseValueInst:
+        case SILInstructionKind::UnownedReleaseInst:
+        case SILInstructionKind::ApplyInst:
+        case SILInstructionKind::TryApplyInst: {
           /// Actually we only add instructions which may release a reference.
           /// We need the use points only for getting the end of a reference's
           /// liferange. And that must be a releasing instruction.
@@ -527,16 +544,28 @@ bool EscapeAnalysis::ConnectionGraph::mergeFrom(ConnectionGraph *SourceGraph,
 /// somehow refer to the Node's value.
 /// Use-points are only values which are relevant for lifeness computation,
 /// e.g. release or apply instructions.
-bool EscapeAnalysis::ConnectionGraph::isUsePoint(ValueBase *V, CGNode *Node) {
+bool EscapeAnalysis::ConnectionGraph::isUsePoint(SILNode *UsePoint,
+                                                 CGNode *Node) {
   assert(Node->getEscapeState() < EscapeState::Global &&
          "Use points are only valid for non-escaping nodes");
-  auto Iter = UsePoints.find(V);
+  UsePoint = UsePoint->getRepresentativeSILNodeInObject();
+  auto Iter = UsePoints.find(UsePoint);
   if (Iter == UsePoints.end())
     return false;
   int Idx = Iter->second;
   if (Idx >= (int)Node->UsePoints.size())
     return false;
   return Node->UsePoints.test(Idx);
+}
+
+void EscapeAnalysis::ConnectionGraph::
+getUsePoints(CGNode *Node, llvm::SmallVectorImpl<SILNode *> &UsePoints) {
+  assert(Node->getEscapeState() < EscapeState::Global &&
+         "Use points are only valid for non-escaping nodes");
+  for (int Idx = Node->UsePoints.find_first(); Idx >= 0;
+       Idx = Node->UsePoints.find_next(Idx)) {
+    UsePoints.push_back(UsePointTable[Idx]);
+  }
 }
 
 bool EscapeAnalysis::ConnectionGraph::isReachable(CGNode *From, CGNode *To) {
@@ -549,8 +578,10 @@ bool EscapeAnalysis::ConnectionGraph::isReachable(CGNode *From, CGNode *To) {
   From->isInWorkList = true;
   for (unsigned Idx = 0; Idx < WorkList.size(); ++Idx) {
     CGNode *Reachable = WorkList[Idx];
-    if (Reachable == To)
+    if (Reachable == To) {
+      clearWorkListFlags(WorkList);
       return true;
+    }
     for (Predecessor Pred : Reachable->Preds) {
       CGNode *PredNode = Pred.getPointer();
       if (!PredNode->isInWorkList) {
@@ -599,7 +630,7 @@ struct CGForDotView {
   const EscapeAnalysis::ConnectionGraph *OrigGraph;
 
   // The same IDs as the SILPrinter uses.
-  llvm::DenseMap<const ValueBase *, unsigned> InstToIDMap;
+  llvm::DenseMap<const SILNode *, unsigned> InstToIDMap;
 
   typedef std::vector<Node>::iterator iterator;
   typedef SmallVectorImpl<Node *>::iterator child_iterator;
@@ -718,14 +749,14 @@ namespace llvm {
   /// GraphTraits specialization so the CGForDotView can be
   /// iterable by generic graph iterators.
   template <> struct GraphTraits<CGForDotView::Node *> {
-    typedef CGForDotView::Node NodeType;
     typedef CGForDotView::child_iterator ChildIteratorType;
+    typedef CGForDotView::Node *NodeRef;
 
-    static NodeType *getEntryNode(NodeType *N) { return N; }
-    static inline ChildIteratorType child_begin(NodeType *N) {
+    static NodeRef getEntryNode(NodeRef N) { return N; }
+    static inline ChildIteratorType child_begin(NodeRef N) {
       return N->Children.begin();
     }
-    static inline ChildIteratorType child_end(NodeType *N) {
+    static inline ChildIteratorType child_end(NodeRef N) {
       return N->Children.end();
     }
   };
@@ -733,14 +764,17 @@ namespace llvm {
   template <> struct GraphTraits<CGForDotView *>
   : public GraphTraits<CGForDotView::Node *> {
     typedef CGForDotView *GraphType;
+    typedef CGForDotView::Node *NodeRef;
 
-    static NodeType *getEntryNode(GraphType F) { return nullptr; }
+    static NodeRef getEntryNode(GraphType F) { return nullptr; }
 
-    typedef CGForDotView::iterator nodes_iterator;
+    typedef pointer_iterator<CGForDotView::iterator> nodes_iterator;
     static nodes_iterator nodes_begin(GraphType OCG) {
-      return OCG->Nodes.begin();
+      return nodes_iterator(OCG->Nodes.begin());
     }
-    static nodes_iterator nodes_end(GraphType OCG) { return OCG->Nodes.end(); }
+    static nodes_iterator nodes_end(GraphType OCG) {
+      return nodes_iterator(OCG->Nodes.end());
+    }
     static unsigned size(GraphType CG) { return CG->Nodes.size(); }
   };
 
@@ -773,9 +807,11 @@ namespace llvm {
         case CGForDotView::PointsTo: return "";
         case CGForDotView::Deferred: return "color=\"gray\"";
       }
+
+      llvm_unreachable("Unhandled CGForDotView in switch.");
     }
   };
-} // end llvm namespace
+} // namespace llvm
 
 #endif
 
@@ -807,6 +843,8 @@ const char *EscapeAnalysis::CGNode::getTypeStr() const {
     case NodeType::Argument:   return "Arg";
     case NodeType::Return:     return "Ret";
   }
+
+  llvm_unreachable("Unhandled NodeType in switch.");
 }
 
 void EscapeAnalysis::ConnectionGraph::dump() const {
@@ -818,7 +856,7 @@ void EscapeAnalysis::ConnectionGraph::print(llvm::raw_ostream &OS) const {
   OS << "CG of " << F->getName() << '\n';
 
   // Assign the same IDs to SILValues as the SILPrinter does.
-  llvm::DenseMap<const ValueBase *, unsigned> InstToIDMap;
+  llvm::DenseMap<const SILNode *, unsigned> InstToIDMap;
   InstToIDMap[nullptr] = (unsigned)-1;
   F->numberValues(InstToIDMap);
 
@@ -862,11 +900,6 @@ void EscapeAnalysis::ConnectionGraph::print(llvm::raw_ostream &OS) const {
   }
   sortNodes(SortedNodes);
 
-  llvm::DenseMap<int, ValueBase *> Idx2UsePoint;
-  for (auto Iter : UsePoints) {
-    Idx2UsePoint[Iter.second] = Iter.first;
-  }
-
   for (CGNode *Nd : SortedNodes) {
     OS << "  " << Nd->getTypeStr() << ' ' << NodeStr(Nd) << " Esc: ";
     switch (Nd->getEscapeState()) {
@@ -874,8 +907,8 @@ void EscapeAnalysis::ConnectionGraph::print(llvm::raw_ostream &OS) const {
         const char *Separator = "";
         for (unsigned VIdx = Nd->UsePoints.find_first(); VIdx != -1u;
              VIdx = Nd->UsePoints.find_next(VIdx)) {
-          ValueBase *V = Idx2UsePoint[VIdx];
-          OS << Separator << '%' << InstToIDMap[V];
+          auto node = UsePointTable[VIdx];
+          OS << Separator << '%' << InstToIDMap[node];
           Separator = ",";
         }
         break;
@@ -973,7 +1006,7 @@ static bool linkBBArgs(SILBasicBlock *BB) {
     return false;
   // We don't need to link to the try_apply's normal result argument, because
   // we handle it separately in setAllEscaping() and mergeCalleeGraph().
-  if (SILBasicBlock *SinglePred = BB->getSinglePredecessor()) {
+  if (SILBasicBlock *SinglePred = BB->getSinglePredecessorBlock()) {
     auto *TAI = dyn_cast<TryApplyInst>(SinglePred->getTerminator());
     if (TAI && BB == TAI->getNormalBB())
       return false;
@@ -987,7 +1020,7 @@ static bool isOrContainsReference(SILType Ty, SILModule *Mod) {
   if (Ty.hasReferenceSemantics())
     return true;
 
-  if (Ty.getSwiftType() == Mod->getASTContext().TheRawPointerType)
+  if (Ty.getSwiftRValueType() == Mod->getASTContext().TheRawPointerType)
     return true;
 
   if (auto *Str = Ty.getStructOrBoundGenericStruct()) {
@@ -1006,7 +1039,7 @@ static bool isOrContainsReference(SILType Ty, SILModule *Mod) {
   }
   if (auto En = Ty.getEnumOrBoundGenericEnum()) {
     for (auto *ElemDecl : En->getAllElements()) {
-      if (ElemDecl->hasArgumentType() &&
+      if (ElemDecl->hasAssociatedValues() &&
           isOrContainsReference(Ty.getEnumElementType(ElemDecl, *Mod), Mod))
         return true;
     }
@@ -1016,7 +1049,6 @@ static bool isOrContainsReference(SILType Ty, SILModule *Mod) {
 }
 
 bool EscapeAnalysis::isPointer(ValueBase *V) {
-  assert(V->hasValue());
   SILType Ty = V->getType();
   auto Iter = isPointerCache.find(Ty);
   if (Iter != isPointerCache.end())
@@ -1067,7 +1099,7 @@ void EscapeAnalysis::buildConnectionGraph(FunctionInfo *FInfo,
 
     // Create defer-edges from the block arguments to it's values in the
     // predecessor's terminator instructions.
-    for (SILArgument *BBArg : BB.getBBArgs()) {
+    for (SILArgument *BBArg : BB.getArguments()) {
       CGNode *ArgNode = ConGraph->getNode(BBArg, this);
       if (!ArgNode)
         continue;
@@ -1095,6 +1127,71 @@ void EscapeAnalysis::buildConnectionGraph(FunctionInfo *FInfo,
         FInfo->Graph.F->getName() << '\n');
 }
 
+/// Returns true if all uses of \p I are tuple_extract instructions.
+static bool onlyUsedInTupleExtract(SILValue V) {
+  for (Operand *Use : getNonDebugUses(V)) {
+    if (!isa<TupleExtractInst>(Use->getUser()))
+      return false;
+  }
+  return true;
+}
+
+bool EscapeAnalysis::buildConnectionGraphForCallees(
+    SILInstruction *Caller, CalleeList Callees, FunctionInfo *FInfo,
+    FunctionOrder &BottomUpOrder, int RecursionDepth) {
+  if (Callees.allCalleesVisible()) {
+    // Derive the connection graph of the apply from the known callees.
+    for (SILFunction *Callee : Callees) {
+      FunctionInfo *CalleeInfo = getFunctionInfo(Callee);
+      CalleeInfo->addCaller(FInfo, Caller);
+      if (!CalleeInfo->isVisited()) {
+        // Recursively visit the called function.
+        buildConnectionGraph(CalleeInfo, BottomUpOrder, RecursionDepth + 1);
+        BottomUpOrder.tryToSchedule(CalleeInfo);
+      }
+    }
+    return true;
+  }
+  return false;
+}
+
+/// Build the connection graph for destructors that may be called
+/// by a given instruction \I for the object \V.
+/// Returns true if V is a local object and destructors called by a given
+/// instruction could be determined. In all other cases returns false.
+bool EscapeAnalysis::buildConnectionGraphForDestructor(
+    SILValue V, SILInstruction *I, FunctionInfo *FInfo,
+    FunctionOrder &BottomUpOrder, int RecursionDepth) {
+  // It should be a locally allocated object.
+  if (!pointsToLocalObject(V))
+    return false;
+  SILModule &M = I->getFunction()->getModule();
+  // Determine the exact type of the value.
+  auto Ty = getExactDynamicTypeOfUnderlyingObject(V, M, nullptr);
+  if (!Ty) {
+    // The object is local, but we cannot determine its type.
+    return false;
+  }
+  // If Ty is an optional, its deallocation is equivalent to the deallocation
+  // of its payload.
+  // TODO: Generalize it. Destructor of an aggregate type is equivalent to calling
+  // destructors for its components.
+  while (auto payloadTy = Ty.getAnyOptionalObjectType())
+    Ty = payloadTy;
+  auto Class = Ty.getClassOrBoundGenericClass();
+  if (!Class || !Class->hasDestructor())
+    return false;
+  auto Destructor = Class->getDestructor();
+  SILDeclRef DeallocRef(Destructor, SILDeclRef::Kind::Deallocator);
+  // Find a SILFunction for destructor.
+  SILFunction *Dealloc = M.lookUpFunction(DeallocRef);
+  if (!Dealloc)
+    return false;
+  CalleeList Callees(Dealloc);
+  return buildConnectionGraphForCallees(I, Callees, FInfo, BottomUpOrder,
+                                        RecursionDepth);
+}
+
 void EscapeAnalysis::analyzeInstruction(SILInstruction *I,
                                         FunctionInfo *FInfo,
                                         FunctionOrder &BottomUpOrder,
@@ -1113,16 +1210,24 @@ void EscapeAnalysis::analyzeInstruction(SILInstruction *I,
         // These array semantics calls do not capture anything.
         return;
       case ArrayCallKind::kArrayUninitialized:
-        // array.uninitialized may have a first argument which is the
-        // allocated array buffer. The call is like a struct(buffer)
-        // instruction.
-        if (CGNode *BufferNode = ConGraph->getNode(FAS.getArgument(0), this)) {
-          ConGraph->defer(ConGraph->getNode(I, this), BufferNode);
+        // Check if the result is used in the usual way: extracting the
+        // array and the element pointer with tuple_extract.
+        if (onlyUsedInTupleExtract(ASC.getCallResult())) {
+          // array.uninitialized may have a first argument which is the
+          // allocated array buffer. The call is like a struct(buffer)
+          // instruction.
+          if (CGNode *BufferNode = ConGraph->getNode(FAS.getArgument(0), this)) {
+            CGNode *ArrayNode = ConGraph->getNode(ASC.getCallResult(), this);
+            CGNode *ArrayContent = ConGraph->getContentNode(ArrayNode);
+            ConGraph->defer(ArrayContent, BufferNode);
+          }
+          return;
         }
-        return;
+        break;
       case ArrayCallKind::kGetArrayOwner:
         if (CGNode *BufferNode = ConGraph->getNode(ASC.getSelf(), this)) {
-          ConGraph->defer(ConGraph->getNode(I, this), BufferNode);
+          ConGraph->defer(ConGraph->getNode(ASC.getCallResult(), this),
+                          BufferNode);
         }
         return;
       case ArrayCallKind::kGetElement:
@@ -1130,7 +1235,7 @@ void EscapeAnalysis::analyzeInstruction(SILInstruction *I,
           CGNode *DestNode = nullptr;
           // This is like a load from a ref_element_addr.
           if (ASC.hasGetElementDirectResult()) {
-            DestNode = ConGraph->getNode(FAS.getInstruction(), this);
+            DestNode = ConGraph->getNode(ASC.getCallResult(), this);
           } else {
             CGNode *DestAddrNode = ConGraph->getNode(FAS.getArgument(0), this);
             assert(DestAddrNode && "indirect result must have node");
@@ -1151,7 +1256,7 @@ void EscapeAnalysis::analyzeInstruction(SILInstruction *I,
       case ArrayCallKind::kGetElementAddress:
         // This is like a ref_element_addr.
         if (CGNode *SelfNode = ConGraph->getNode(ASC.getSelf(), this)) {
-          ConGraph->defer(ConGraph->getNode(I, this),
+          ConGraph->defer(ConGraph->getNode(ASC.getCallResult(), this),
                           ConGraph->getContentNode(SelfNode));
         }
         return;
@@ -1178,12 +1283,12 @@ void EscapeAnalysis::analyzeInstruction(SILInstruction *I,
         break;
     }
 
-    if (FAS.getReferencedFunction() &&
-        FAS.getReferencedFunction()->hasSemanticsAttr(
-            "self_no_escaping_closure") &&
-        ((FAS.hasIndirectResults() && FAS.getNumArguments() == 3) ||
-         (!FAS.hasIndirectResults() && FAS.getNumArguments() == 2)) &&
-        FAS.hasSelfArgument()) {
+    if (FAS.getReferencedFunction()
+        && FAS.getReferencedFunction()->hasSemanticsAttr(
+               "self_no_escaping_closure")
+        && ((FAS.hasIndirectSILResults() && FAS.getNumArguments() == 3)
+            || (!FAS.hasIndirectSILResults() && FAS.getNumArguments() == 2))
+        && FAS.hasSelfArgument()) {
       // The programmer has guaranteed that the closure will not capture the
       // self pointer passed to it or anything that is transitively reachable
       // from the pointer.
@@ -1193,12 +1298,12 @@ void EscapeAnalysis::analyzeInstruction(SILInstruction *I,
       return;
     }
 
-    if (FAS.getReferencedFunction() &&
-        FAS.getReferencedFunction()->hasSemanticsAttr(
-            "pair_no_escaping_closure") &&
-        ((FAS.hasIndirectResults() && FAS.getNumArguments() == 4) ||
-         (!FAS.hasIndirectResults() && FAS.getNumArguments() == 3)) &&
-        FAS.hasSelfArgument()) {
+    if (FAS.getReferencedFunction()
+        && FAS.getReferencedFunction()->hasSemanticsAttr(
+               "pair_no_escaping_closure")
+        && ((FAS.hasIndirectSILResults() && FAS.getNumArguments() == 4)
+            || (!FAS.hasIndirectSILResults() && FAS.getNumArguments() == 3))
+        && FAS.hasSelfArgument()) {
       // The programmer has guaranteed that the closure will not capture the
       // self pointer passed to it or anything that is transitively reachable
       // from the pointer.
@@ -1210,19 +1315,9 @@ void EscapeAnalysis::analyzeInstruction(SILInstruction *I,
 
     if (RecursionDepth < MaxRecursionDepth) {
       CalleeList Callees = BCA->getCalleeList(FAS);
-      if (Callees.allCalleesVisible()) {
-        // Derive the connection graph of the apply from the known callees.
-        for (SILFunction *Callee : Callees) {
-          FunctionInfo *CalleeInfo = getFunctionInfo(Callee);
-          CalleeInfo->addCaller(FInfo, FAS);
-          if (!CalleeInfo->isVisited()) {
-            // Recursively visit the called function.
-            buildConnectionGraph(CalleeInfo, BottomUpOrder, RecursionDepth + 1);
-            BottomUpOrder.tryToSchedule(CalleeInfo);
-          }
-        }
+      if (buildConnectionGraphForCallees(FAS.getInstruction(), Callees, FInfo,
+                                         BottomUpOrder, RecursionDepth))
         return;
-      }
     }
 
     if (auto *Fn = FAS.getReferencedFunction()) {
@@ -1231,6 +1326,19 @@ void EscapeAnalysis::analyzeInstruction(SILInstruction *I,
         return;
     }
   }
+
+  if (isa<StrongReleaseInst>(I) || isa<ReleaseValueInst>(I)) {
+    // Treat the release instruction as if it is the invocation
+    // of a deinit function.
+    if (RecursionDepth < MaxRecursionDepth) {
+      // Check if the destructor is known.
+      auto OpV = cast<RefCountingInst>(I)->getOperand(0);
+      if (buildConnectionGraphForDestructor(OpV, I, FInfo, BottomUpOrder,
+                                            RecursionDepth))
+        return;
+    }
+  }
+
   if (isProjection(I))
     return;
 
@@ -1240,32 +1348,35 @@ void EscapeAnalysis::analyzeInstruction(SILInstruction *I,
     return;
 
   switch (I->getKind()) {
-    case ValueKind::AllocStackInst:
-    case ValueKind::AllocRefInst:
-    case ValueKind::AllocBoxInst:
-      ConGraph->getNode(I, this);
+    case SILInstructionKind::AllocStackInst:
+    case SILInstructionKind::AllocRefInst:
+    case SILInstructionKind::AllocBoxInst:
+      ConGraph->getNode(cast<SingleValueInstruction>(I), this);
       return;
 
-    case ValueKind::DeallocStackInst:
-    case ValueKind::StrongRetainInst:
-    case ValueKind::StrongRetainUnownedInst:
-    case ValueKind::RetainValueInst:
-    case ValueKind::UnownedRetainInst:
-    case ValueKind::BranchInst:
-    case ValueKind::CondBranchInst:
-    case ValueKind::SwitchEnumInst:
-    case ValueKind::DebugValueInst:
-    case ValueKind::DebugValueAddrInst:
-    case ValueKind::ValueMetatypeInst:
-    case ValueKind::InitExistentialMetatypeInst:
-    case ValueKind::OpenExistentialMetatypeInst:
-    case ValueKind::ExistentialMetatypeInst:
+    case SILInstructionKind::DeallocStackInst:
+    case SILInstructionKind::StrongRetainInst:
+    case SILInstructionKind::StrongRetainUnownedInst:
+    case SILInstructionKind::RetainValueInst:
+    case SILInstructionKind::UnownedRetainInst:
+    case SILInstructionKind::BranchInst:
+    case SILInstructionKind::CondBranchInst:
+    case SILInstructionKind::SwitchEnumInst:
+    case SILInstructionKind::DebugValueInst:
+    case SILInstructionKind::DebugValueAddrInst:
+    case SILInstructionKind::ValueMetatypeInst:
+    case SILInstructionKind::InitExistentialMetatypeInst:
+    case SILInstructionKind::OpenExistentialMetatypeInst:
+    case SILInstructionKind::ExistentialMetatypeInst:
+    case SILInstructionKind::DeallocRefInst:
+    case SILInstructionKind::SetDeallocatingInst:
+    case SILInstructionKind::FixLifetimeInst:
       // These instructions don't have any effect on escaping.
       return;
-    case ValueKind::StrongReleaseInst:
-    case ValueKind::ReleaseValueInst:
-    case ValueKind::StrongUnpinInst:
-    case ValueKind::UnownedReleaseInst: {
+    case SILInstructionKind::StrongReleaseInst:
+    case SILInstructionKind::ReleaseValueInst:
+    case SILInstructionKind::StrongUnpinInst:
+    case SILInstructionKind::UnownedReleaseInst: {
       SILValue OpV = I->getOperand(0);
       if (CGNode *AddrNode = ConGraph->getNode(OpV, this)) {
         // A release instruction may deallocate the pointer operand. This may
@@ -1281,28 +1392,31 @@ void EscapeAnalysis::analyzeInstruction(SILInstruction *I,
       }
       return;
     }
-    case ValueKind::LoadInst:
-    case ValueKind::LoadWeakInst:
+    case SILInstructionKind::LoadInst:
+    case SILInstructionKind::LoadWeakInst:
     // We treat ref_element_addr like a load (see NodeType::Content).
-    case ValueKind::RefElementAddrInst:
-    case ValueKind::ProjectBoxInst:
-    case ValueKind::InitExistentialAddrInst:
-    case ValueKind::OpenExistentialAddrInst:
-      if (isPointer(I)) {
-        CGNode *AddrNode = ConGraph->getNode(I->getOperand(0), this);
+    case SILInstructionKind::RefElementAddrInst:
+    case SILInstructionKind::RefTailAddrInst:
+    case SILInstructionKind::ProjectBoxInst:
+    case SILInstructionKind::InitExistentialAddrInst:
+    case SILInstructionKind::OpenExistentialAddrInst: {
+      auto SVI = cast<SingleValueInstruction>(I);
+      if (isPointer(SVI)) {
+        CGNode *AddrNode = ConGraph->getNode(SVI->getOperand(0), this);
         if (!AddrNode) {
           // A load from an address we don't handle -> be conservative.
-          CGNode *ValueNode = ConGraph->getNode(I, this);
+          CGNode *ValueNode = ConGraph->getNode(SVI, this);
           ConGraph->setEscapesGlobal(ValueNode);
           return;
         }
         CGNode *PointsTo = ConGraph->getContentNode(AddrNode);
         // No need for a separate node for the load instruction:
         // just reuse the content node.
-        ConGraph->setNode(I, PointsTo);
+        ConGraph->setNode(SVI, PointsTo);
       }
       return;
-    case ValueKind::CopyAddrInst: {
+    }
+    case SILInstructionKind::CopyAddrInst: {
       // Be conservative if the dest may be the final release.
       if (!cast<CopyAddrInst>(I)->isInitializationOfDest()) {
         setAllEscaping(I, ConGraph);
@@ -1331,8 +1445,8 @@ void EscapeAnalysis::analyzeInstruction(SILInstruction *I,
       return;
     }
     break;
-    case ValueKind::StoreInst:
-    case ValueKind::StoreWeakInst:
+    case SILInstructionKind::StoreInst:
+    case SILInstructionKind::StoreWeakInst:
       if (CGNode *ValueNode = ConGraph->getNode(I->getOperand(StoreInst::Src),
                                                 this)) {
         CGNode *AddrNode = ConGraph->getNode(I->getOperand(StoreInst::Dest),
@@ -1347,40 +1461,42 @@ void EscapeAnalysis::analyzeInstruction(SILInstruction *I,
         }
       }
       return;
-    case ValueKind::PartialApplyInst: {
+    case SILInstructionKind::PartialApplyInst: {
       // The result of a partial_apply is a thick function which stores the
       // boxed partial applied arguments. We create defer-edges from the
       // partial_apply values to the arguments.
-      CGNode *ResultNode = ConGraph->getNode(I, this);
+      auto PAI = cast<PartialApplyInst>(I);
+      CGNode *ResultNode = ConGraph->getNode(PAI, this);
       assert(ResultNode && "thick functions must have a CG node");
-      for (const Operand &Op : I->getAllOperands()) {
+      for (const Operand &Op : PAI->getAllOperands()) {
         if (CGNode *ArgNode = ConGraph->getNode(Op.get(), this)) {
           ResultNode = ConGraph->defer(ResultNode, ArgNode);
         }
       }
       return;
     }
-    case ValueKind::SelectEnumInst:
-    case ValueKind::SelectEnumAddrInst:
+    case SILInstructionKind::SelectEnumInst:
+    case SILInstructionKind::SelectEnumAddrInst:
       analyzeSelectInst(cast<SelectEnumInstBase>(I), ConGraph);
       return;
-    case ValueKind::SelectValueInst:
+    case SILInstructionKind::SelectValueInst:
       analyzeSelectInst(cast<SelectValueInst>(I), ConGraph);
       return;
-    case ValueKind::StructInst:
-    case ValueKind::TupleInst:
-    case ValueKind::EnumInst: {
+    case SILInstructionKind::StructInst:
+    case SILInstructionKind::TupleInst:
+    case SILInstructionKind::EnumInst: {
       // Aggregate composition is like assigning the aggregate fields to the
       // resulting aggregate value.
+      auto SVI = cast<SingleValueInstruction>(I);
       CGNode *ResultNode = nullptr;
-      for (const Operand &Op : I->getAllOperands()) {
+      for (const Operand &Op : SVI->getAllOperands()) {
         if (CGNode *FieldNode = ConGraph->getNode(Op.get(), this)) {
           if (!ResultNode) {
             // A small optimization to reduce the graph size: we re-use the
             // first field node as result node.
-            ConGraph->setNode(I, FieldNode);
+            ConGraph->setNode(SVI, FieldNode);
             ResultNode = FieldNode;
-            assert(isPointer(I));
+            assert(isPointer(SVI));
           } else {
             ResultNode = ConGraph->defer(ResultNode, FieldNode);
           }
@@ -1388,26 +1504,40 @@ void EscapeAnalysis::analyzeInstruction(SILInstruction *I,
       }
       return;
     }
-    case ValueKind::UncheckedRefCastInst:
-    case ValueKind::ConvertFunctionInst:
-    case ValueKind::UpcastInst:
-    case ValueKind::InitExistentialRefInst:
-    case ValueKind::OpenExistentialRefInst:
-    case ValueKind::UnownedToRefInst:
-    case ValueKind::RefToUnownedInst:
-    case ValueKind::RawPointerToRefInst:
-    case ValueKind::RefToRawPointerInst:
-    case ValueKind::RefToBridgeObjectInst:
-    case ValueKind::BridgeObjectToRefInst:
-    case ValueKind::UncheckedAddrCastInst:
-    case ValueKind::UnconditionalCheckedCastInst:
-    case ValueKind::StrongPinInst:
+    case SILInstructionKind::TupleExtractInst: {
+      // This is a tuple_extract which extracts the second result of an
+      // array.uninitialized call. The first result is the array itself.
+      // The second result (which is a pointer to the array elements) must be
+      // the content node of the first result. It's just like a ref_element_addr
+      // instruction.
+      auto *TEI = cast<TupleExtractInst>(I);
+      assert(isExtractOfArrayUninitializedPointer(TEI)
+             && "tuple_extract should be handled as projection");
+      CGNode *ArrayNode = ConGraph->getNode(TEI->getOperand(), this);
+      CGNode *ArrayElements = ConGraph->getContentNode(ArrayNode);
+      ConGraph->setNode(TEI, ArrayElements);
+      return;
+    }
+    case SILInstructionKind::UncheckedRefCastInst:
+    case SILInstructionKind::ConvertFunctionInst:
+    case SILInstructionKind::UpcastInst:
+    case SILInstructionKind::InitExistentialRefInst:
+    case SILInstructionKind::OpenExistentialRefInst:
+    case SILInstructionKind::UnownedToRefInst:
+    case SILInstructionKind::RefToUnownedInst:
+    case SILInstructionKind::RawPointerToRefInst:
+    case SILInstructionKind::RefToRawPointerInst:
+    case SILInstructionKind::RefToBridgeObjectInst:
+    case SILInstructionKind::BridgeObjectToRefInst:
+    case SILInstructionKind::UncheckedAddrCastInst:
+    case SILInstructionKind::UnconditionalCheckedCastInst:
+    case SILInstructionKind::StrongPinInst:
       // A cast is almost like a projection.
       if (CGNode *OpNode = ConGraph->getNode(I->getOperand(0), this)) {
-        ConGraph->setNode(I, OpNode);
+        ConGraph->setNode(cast<SingleValueInstruction>(I), OpNode);
       }
       break;
-    case ValueKind::UncheckedRefCastAddrInst: {
+    case SILInstructionKind::UncheckedRefCastAddrInst: {
       auto *URCAI = cast<UncheckedRefCastAddrInst>(I);
       CGNode *SrcNode = ConGraph->getNode(URCAI->getSrc(), this);
       CGNode *DestNode = ConGraph->getNode(URCAI->getDest(), this);
@@ -1415,7 +1545,7 @@ void EscapeAnalysis::analyzeInstruction(SILInstruction *I,
       ConGraph->defer(DestNode, SrcNode);
       return;
     }
-    case ValueKind::ReturnInst:
+    case SILInstructionKind::ReturnInst:
       if (CGNode *ValueNd = ConGraph->getNode(cast<ReturnInst>(I)->getOperand(),
                                               this)) {
         ConGraph->defer(ConGraph->getReturnNode(), ValueNd);
@@ -1469,8 +1599,8 @@ bool EscapeAnalysis::deinitIsKnownToNotCapture(SILValue V) {
       }
       return true;
     }
-    if (isProjection(V)) {
-      V = dyn_cast<SILInstruction>(V)->getOperand(0);
+    if (auto SVI = isProjection(V)) {
+      V = SVI->getOperand(0);
       continue;
     }
     return false;
@@ -1480,8 +1610,8 @@ bool EscapeAnalysis::deinitIsKnownToNotCapture(SILValue V) {
 void EscapeAnalysis::setAllEscaping(SILInstruction *I,
                                     ConnectionGraph *ConGraph) {
   if (auto *TAI = dyn_cast<TryApplyInst>(I)) {
-    setEscapesGlobal(ConGraph, TAI->getNormalBB()->getBBArg(0));
-    setEscapesGlobal(ConGraph, TAI->getErrorBB()->getBBArg(0));
+    setEscapesGlobal(ConGraph, TAI->getNormalBB()->getArgument(0));
+    setEscapesGlobal(ConGraph, TAI->getErrorBB()->getArgument(0));
   }
   // Even if the instruction does not write memory we conservatively set all
   // operands to escaping, because they may "escape" to the result value in
@@ -1494,7 +1624,8 @@ void EscapeAnalysis::setAllEscaping(SILInstruction *I,
   }
   // Even if the instruction does not write memory it could e.g. return the
   // address of global memory. Therefore we have to define it as escaping.
-  setEscapesGlobal(ConGraph, I);
+  for (auto result : I->getResults())
+    setEscapesGlobal(ConGraph, result);
 }
 
 void EscapeAnalysis::recompute(FunctionInfo *Initial) {
@@ -1568,7 +1699,7 @@ void EscapeAnalysis::recompute(FunctionInfo *Initial) {
         for (const auto &E : FInfo->getCallers()) {
           assert(E.isValid());
           if (BottomUpOrder.wasRecomputedWithCurrentUpdateID(E.Caller)) {
-            setAllEscaping(E.FAS.getInstruction(), &E.Caller->Graph);
+            setAllEscaping(E.FAS, &E.Caller->Graph);
             E.Caller->NeedUpdateSummaryGraph = true;
             NeedAnotherIteration = true;
           }
@@ -1587,14 +1718,15 @@ void EscapeAnalysis::recompute(FunctionInfo *Initial) {
   }
 }
 
-bool EscapeAnalysis::mergeCalleeGraph(FullApplySite FAS,
+bool EscapeAnalysis::mergeCalleeGraph(SILInstruction *AS,
                                       ConnectionGraph *CallerGraph,
                                       ConnectionGraph *CalleeGraph) {
   CGNodeMap Callee2CallerMapping;
 
   // First map the callee parameters to the caller arguments.
   SILFunction *Callee = CalleeGraph->F;
-  unsigned numCallerArgs = FAS.getNumArguments();
+  auto FAS = FullApplySite::isa(AS);
+  unsigned numCallerArgs = FAS ? FAS.getNumArguments() : 1;
   unsigned numCalleeArgs = Callee->getArguments().size();
   assert(numCalleeArgs >= numCallerArgs);
   for (unsigned Idx = 0; Idx < numCalleeArgs; ++Idx) {
@@ -1603,8 +1735,13 @@ bool EscapeAnalysis::mergeCalleeGraph(FullApplySite FAS,
     // function also references the boxed partially applied arguments.
     // Therefore we map all the extra callee parameters to the callee operand
     // of the apply site.
-    SILValue CallerArg = (Idx < numCallerArgs ? FAS.getArgument(Idx) :
-                          FAS.getCallee());
+    SILValue CallerArg;
+    if (FAS)
+      CallerArg =
+          (Idx < numCallerArgs ? FAS.getArgument(Idx) : FAS.getCallee());
+    else
+      CallerArg = (Idx < numCallerArgs ? AS->getOperand(Idx) : SILValue());
+
     CGNode *CalleeNd = CalleeGraph->getNode(Callee->getArgument(Idx), this);
     if (!CalleeNd)
       continue;
@@ -1621,11 +1758,14 @@ bool EscapeAnalysis::mergeCalleeGraph(FullApplySite FAS,
 
   // Map the return value.
   if (CGNode *RetNd = CalleeGraph->getReturnNodeOrNull()) {
+    // The non-ApplySite instructions that cause calls are to things like
+    // destructors that don't have return values.
+    assert(FAS);
     ValueBase *CallerReturnVal = nullptr;
-    if (auto *TAI = dyn_cast<TryApplyInst>(FAS.getInstruction())) {
-      CallerReturnVal = TAI->getNormalBB()->getBBArg(0);
+    if (auto *TAI = dyn_cast<TryApplyInst>(AS)) {
+      CallerReturnVal = TAI->getNormalBB()->getArgument(0);
     } else {
-      CallerReturnVal = FAS.getInstruction();
+      CallerReturnVal = cast<ApplyInst>(AS);
     }
     CGNode *CallerRetNd = CallerGraph->getNode(CallerReturnVal, this);
     Callee2CallerMapping.add(RetNd, CallerRetNd);
@@ -1650,7 +1790,7 @@ bool EscapeAnalysis::mergeSummaryGraph(ConnectionGraph *SummaryGraph,
   return SummaryGraph->mergeFrom(Graph, Mapping);
 }
 
-bool EscapeAnalysis::canEscapeToUsePoint(SILValue V, ValueBase *UsePoint,
+bool EscapeAnalysis::canEscapeToUsePoint(SILValue V, SILNode *UsePoint,
                                          ConnectionGraph *ConGraph) {
 
   assert((FullApplySite::isa(UsePoint) || isa<RefCountingInst>(UsePoint)) &&
@@ -1702,9 +1842,16 @@ bool EscapeAnalysis::canObjectOrContentEscapeTo(SILValue V, FullApplySite FAS) {
   if (ConGraph->isUsePoint(UsePoint, Node))
     return true;
 
-  if (hasReferenceSemantics(V->getType())) {
-    // Check if the object "content", i.e. a pointer to one of its stored
-    // properties, can escape to the called function.
+  if (isPointer(V)) {
+    // Check if the object "content" can escape to the called function.
+    // This will catch cases where V is a reference and a pointer to a stored
+    // property escapes.
+    // It's also important in case of a pointer assignment, e.g.
+    //    V = V1
+    //    apply(V1)
+    // In this case the apply is only a use-point for V1 and V1's content node.
+    // As V1's content node is the same as V's content node, we also make the
+    // check for the content node.
     CGNode *ContentNode = ConGraph->getContentNode(Node);
     if (ContentNode->escapesInsideFunction(false))
       return true;
@@ -1725,8 +1872,8 @@ bool EscapeAnalysis::canEscapeTo(SILValue V, RefCountingInst *RI) {
 
 /// Utility to get the function which contains both values \p V1 and \p V2.
 static SILFunction *getCommonFunction(SILValue V1, SILValue V2) {
-  SILBasicBlock *BB1 = V1->getParentBB();
-  SILBasicBlock *BB2 = V2->getParentBB();
+  SILBasicBlock *BB1 = V1->getParentBlock();
+  SILBasicBlock *BB2 = V2->getParentBlock();
   if (!BB1 || !BB2)
     return nullptr;
 
@@ -1837,7 +1984,7 @@ bool EscapeAnalysis::canParameterEscape(FullApplySite FAS, int ParamIdx,
   return false;
 }
 
-void EscapeAnalysis::invalidate(InvalidationKind K) {
+void EscapeAnalysis::invalidate() {
   Function2Info.clear();
   Allocator.DestroyAll();
   DEBUG(llvm::dbgs() << "invalidate all\n");
@@ -1850,13 +1997,16 @@ void EscapeAnalysis::invalidate(SILFunction *F, InvalidationKind K) {
   }
 }
 
-void EscapeAnalysis::handleDeleteNotification(ValueBase *I) {
-  if (SILBasicBlock *Parent = I->getParentBB()) {
+void EscapeAnalysis::handleDeleteNotification(SILNode *node) {
+  auto value = dyn_cast<ValueBase>(node);
+  if (!value) return;
+
+  if (SILBasicBlock *Parent = node->getParentBlock()) {
     SILFunction *F = Parent->getParent();
     if (FunctionInfo *FInfo = Function2Info.lookup(F)) {
       if (FInfo->isValid()) {
-        FInfo->Graph.removeFromGraph(I);
-        FInfo->SummaryGraph.removeFromGraph(I);
+        FInfo->Graph.removeFromGraph(value);
+        FInfo->SummaryGraph.removeFromGraph(value);
       }
     }
   }

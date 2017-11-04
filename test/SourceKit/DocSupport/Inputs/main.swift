@@ -39,7 +39,7 @@ func foo(_ a: CC, b: E) {
   var b = b
   _ = b
   globV = 0
-  a + a.instV
+  _ = a + a.instV
   a.meth()
   CC.smeth()
   b = E.EElem
@@ -87,7 +87,7 @@ class CC2 {
       return i
     }
     set(vvv) {
-      vvv+1
+      _ = vvv+1
     }
   }
 }
@@ -148,8 +148,8 @@ struct S1 : Prot2 {
   func foo() {}
 }
 
-func genfoo<T : Prot2 where T.Element == Int>(_ x: T) {}
+func genfoo<T : Prot2>(_ x: T) where T.Element == Int {}
 
 protocol Prot3 {
-  func +(x: Self, y: Self)
+  static func +(x: Self, y: Self)
 }

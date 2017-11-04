@@ -2,53 +2,70 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
-
-//===----------------------------------------------------------------------===//
-// FIXME: Workaround for inability to create existentials of protocols
-// with associated types <rdar://problem/11689181>
 
 // This file contains "existentials" for the protocols defined in
 // Policy.swift.  Similar components should usually be defined next to
 // their respective protocols.
 
+@_fixed_layout // FIXME(sil-serialize-all)
+@_versioned // FIXME(sil-serialize-all)
 internal struct _CollectionOf<
-  IndexType_ : ForwardIndex, T
+  IndexType : Strideable, Element
 > : Collection {
-  init(startIndex: IndexType_, endIndex: IndexType_,
-      _ subscriptImpl: (IndexType_) -> T) {
-    self.startIndex = startIndex
+
+  @_inlineable // FIXME(sil-serialize-all)
+  @_versioned // FIXME(sil-serialize-all)
+  internal init(
+    _startIndex: IndexType, endIndex: IndexType,
+    _ subscriptImpl: @escaping (IndexType) -> Element
+  ) {
+    self.startIndex = _startIndex
     self.endIndex = endIndex
-    _subscriptImpl = subscriptImpl
+    self._subscriptImpl = subscriptImpl
   }
 
   /// Returns an iterator over the elements of this sequence.
   ///
   /// - Complexity: O(1).
-  func makeIterator() -> AnyIterator<T> {
+  @_inlineable // FIXME(sil-serialize-all)
+  @_versioned // FIXME(sil-serialize-all)
+  internal func makeIterator() -> AnyIterator<Element> {
     var index = startIndex
     return AnyIterator {
-      () -> T? in
+      () -> Element? in
       if _fastPath(index != self.endIndex) {
-        index._successorInPlace()
+        self.formIndex(after: &index)
         return self._subscriptImpl(index)
       }
       return nil
     }
   }
 
-  let startIndex: IndexType_
-  let endIndex: IndexType_
+  @_versioned // FIXME(sil-serialize-all)
+  internal let startIndex: IndexType
+  @_versioned // FIXME(sil-serialize-all)
+  internal let endIndex: IndexType
 
-  subscript(i: IndexType_) -> T {
+  @_inlineable // FIXME(sil-serialize-all)
+  @_versioned // FIXME(sil-serialize-all)
+  internal func index(after i: IndexType) -> IndexType {
+    return i.advanced(by: 1)
+  }
+
+  @_inlineable // FIXME(sil-serialize-all)
+  @_versioned // FIXME(sil-serialize-all)
+  internal subscript(i: IndexType) -> Element {
     return _subscriptImpl(i)
   }
 
-  let _subscriptImpl: (IndexType_) -> T
+  @_versioned // FIXME(sil-serialize-all)
+  internal let _subscriptImpl: (IndexType) -> Element
 }
+

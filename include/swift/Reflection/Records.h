@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 //
@@ -19,6 +19,8 @@
 
 #include "swift/Basic/RelativePointer.h"
 
+const uint16_t SWIFT_REFLECTION_METADATA_VERSION = 3; // superclass field
+
 namespace swift {
 namespace reflection {
 
@@ -27,19 +29,21 @@ namespace reflection {
 class FieldRecordFlags {
   using int_type = uint32_t;
   enum : int_type {
-    IsObjC = 0x00000001,
+    // Is this an indirect enum case?
+    IsIndirectCase = 0x1
   };
-  int_type Data;
+  int_type Data = 0;
+
 public:
-  bool isObjC() const {
-    return Data & IsObjC;
+  bool isIndirectCase() const {
+    return (Data & IsIndirectCase) == IsIndirectCase;
   }
 
-  void setIsObjC(bool ObjC) {
-    if (ObjC)
-      Data |= IsObjC;
+  void setIsIndirectCase(bool IndirectCase=true) {
+    if (IndirectCase)
+      Data |= IsIndirectCase;
     else
-      Data &= ~IsObjC;
+      Data &= ~IsIndirectCase;
   }
 
   int_type getRawValue() const {
@@ -69,8 +73,8 @@ public:
     return "";
   }
 
-  bool isObjC() const {
-    return Flags.isObjC();
+  bool isIndirectCase() const {
+    return Flags.isIndirectCase();
   }
 };
 
@@ -83,6 +87,10 @@ struct FieldRecordIterator {
 
   const FieldRecord &operator*() const {
     return *Cur;
+  }
+
+  const FieldRecord *operator->() const {
+    return Cur;
   }
 
   FieldRecordIterator &operator++() {
@@ -100,9 +108,33 @@ struct FieldRecordIterator {
 };
 
 enum class FieldDescriptorKind : uint16_t {
+  // Swift nominal types.
   Struct,
   Class,
-  Enum
+  Enum,
+
+  // Fixed-size multi-payload enums have a special descriptor format that
+  // encodes spare bits.
+  //
+  // FIXME: Actually implement this. For now, a descriptor with this kind
+  // just means we also have a builtin descriptor from which we get the
+  // size and alignment.
+  MultiPayloadEnum,
+
+  // A Swift opaque protocol. There are no fields, just a record for the
+  // type itself.
+  Protocol,
+
+  // A Swift class-bound protocol.
+  ClassProtocol,
+
+  // An Objective-C protocol, which may be imported or defined in Swift.
+  ObjCProtocol,
+
+  // An Objective-C class, which may be imported or defined in Swift.
+  // In the former case, field type metadata is not emitted, and
+  // must be obtained from the Objective-C runtime.
+  ObjCClass
 };
 
 // Field descriptors contain a collection of field records for a single
@@ -113,6 +145,7 @@ class FieldDescriptor {
   }
 
   const RelativeDirectPointer<const char> MangledTypeName;
+  const RelativeDirectPointer<const char> Superclass;
 
 public:
   FieldDescriptor() = delete;
@@ -122,6 +155,22 @@ public:
   const uint32_t NumFields;
 
   using const_iterator = FieldRecordIterator;
+
+  bool isEnum() const {
+    return (Kind == FieldDescriptorKind::Enum ||
+            Kind == FieldDescriptorKind::MultiPayloadEnum);
+  }
+
+  bool isClass() const {
+    return (Kind == FieldDescriptorKind::Class ||
+            Kind == FieldDescriptorKind::ObjCClass);
+  }
+
+  bool isProtocol() const {
+    return (Kind == FieldDescriptorKind::Protocol ||
+            Kind == FieldDescriptorKind::ClassProtocol ||
+            Kind == FieldDescriptorKind::ObjCProtocol);
+  }
 
   const_iterator begin() const {
     auto Begin = getFieldRecordBuffer();
@@ -142,6 +191,14 @@ public:
   std::string getMangledTypeName() const {
     return MangledTypeName.get();
   }
+
+  bool hasSuperclass() const {
+    return Superclass;
+  }
+
+  std::string getSuperclass() const {
+    return Superclass.get();
+  }
 };
 
 class FieldDescriptorIterator
@@ -154,6 +211,10 @@ public:
 
   const FieldDescriptor &operator*() const {
     return *reinterpret_cast<const FieldDescriptor *>(Cur);
+  }
+
+  const FieldDescriptor *operator->() const {
+    return reinterpret_cast<const FieldDescriptor *>(Cur);
   }
 
   FieldDescriptorIterator &operator++() {
@@ -202,6 +263,10 @@ struct AssociatedTypeRecordIterator {
 
   const AssociatedTypeRecord &operator*() const {
     return *Cur;
+  }
+
+  const AssociatedTypeRecord *operator->() const {
+    return Cur;
   }
 
   AssociatedTypeRecordIterator &operator++() {
@@ -275,6 +340,10 @@ public:
     return *reinterpret_cast<const AssociatedTypeDescriptor *>(Cur);
   }
 
+  const AssociatedTypeDescriptor *operator->() const {
+    return reinterpret_cast<const AssociatedTypeDescriptor *>(Cur);
+  }
+
   AssociatedTypeIterator &operator++() {
     const auto &ATR = this->operator*();
     size_t Size = sizeof(AssociatedTypeDescriptor) +
@@ -325,6 +394,10 @@ public:
     return *reinterpret_cast<const BuiltinTypeDescriptor *>(Cur);
   }
 
+  const BuiltinTypeDescriptor *operator->() const {
+    return reinterpret_cast<const BuiltinTypeDescriptor *>(Cur);;
+  }
+
   BuiltinTypeDescriptorIterator &operator++() {
     const void *Next = reinterpret_cast<const char *>(Cur)
       + sizeof(BuiltinTypeDescriptor);
@@ -337,6 +410,192 @@ public:
   }
 
   bool operator!=(BuiltinTypeDescriptorIterator const &other) const {
+    return !(*this == other);
+  }
+};
+
+class CaptureTypeRecord {
+  const RelativeDirectPointer<const char> MangledTypeName;
+
+public:
+  CaptureTypeRecord() = delete;
+
+  bool hasMangledTypeName() const {
+    return MangledTypeName;
+  }
+
+  std::string getMangledTypeName() const {
+    return MangledTypeName.get();
+  }
+};
+
+struct CaptureTypeRecordIterator {
+  const CaptureTypeRecord *Cur;
+  const CaptureTypeRecord * const End;
+
+  CaptureTypeRecordIterator(const CaptureTypeRecord *Cur,
+                            const CaptureTypeRecord * const End)
+    : Cur(Cur), End(End) {}
+
+  const CaptureTypeRecord &operator*() const {
+    return *Cur;
+  }
+
+  const CaptureTypeRecord *operator->() const {
+    return Cur;
+  }
+
+  CaptureTypeRecordIterator &operator++() {
+    ++Cur;
+    return *this;
+  }
+
+  bool operator==(const CaptureTypeRecordIterator &other) const {
+    return Cur == other.Cur && End == other.End;
+  }
+
+  bool operator!=(const CaptureTypeRecordIterator &other) const {
+    return !(*this == other);
+  }
+};
+
+class MetadataSourceRecord {
+  const RelativeDirectPointer<const char> MangledTypeName;
+  const RelativeDirectPointer<const char> MangledMetadataSource;
+
+public:
+  MetadataSourceRecord() = delete;
+
+  bool hasMangledTypeName() const {
+    return MangledTypeName;
+  }
+
+  std::string getMangledTypeName() const {
+    return MangledTypeName.get();
+  }
+
+  bool hasMangledMetadataSource() const {
+    return MangledMetadataSource;
+  }
+
+  std::string getMangledMetadataSource() const {
+    return MangledMetadataSource.get();
+  }
+};
+
+struct MetadataSourceRecordIterator {
+  const MetadataSourceRecord *Cur;
+  const MetadataSourceRecord * const End;
+
+  MetadataSourceRecordIterator(const MetadataSourceRecord *Cur,
+                            const MetadataSourceRecord * const End)
+    : Cur(Cur), End(End) {}
+
+  const MetadataSourceRecord &operator*() const {
+    return *Cur;
+  }
+
+  const MetadataSourceRecord *operator->() const {
+    return Cur;
+  }
+
+  MetadataSourceRecordIterator &operator++() {
+    ++Cur;
+    return *this;
+  }
+
+  bool operator==(const MetadataSourceRecordIterator &other) const {
+    return Cur == other.Cur && End == other.End;
+  }
+
+  bool operator!=(const MetadataSourceRecordIterator &other) const {
+    return !(*this == other);
+  }
+};
+
+// Capture descriptors describe the layout of a closure context
+// object. Unlike nominal types, the generic substitutions for a
+// closure context come from the object, and not the metadata.
+class CaptureDescriptor {
+  const CaptureTypeRecord *getCaptureTypeRecordBuffer() const {
+    return reinterpret_cast<const CaptureTypeRecord *>(this + 1);
+  }
+
+  const MetadataSourceRecord *getMetadataSourceRecordBuffer() const {
+    return reinterpret_cast<const MetadataSourceRecord *>(capture_end().End);
+  }
+
+public:
+  /// The number of captures in the closure and the number of typerefs that
+  /// immediately follow this struct.
+  uint32_t NumCaptureTypes;
+
+  /// The number of sources of metadata available in the MetadataSourceMap
+  /// directly following the list of capture's typerefs.
+  uint32_t NumMetadataSources;
+
+  /// The number of items in the NecessaryBindings structure at the head of
+  /// the closure.
+  uint32_t NumBindings;
+
+  using const_iterator = FieldRecordIterator;
+
+  CaptureTypeRecordIterator capture_begin() const {
+    auto Begin = getCaptureTypeRecordBuffer();
+    auto End = Begin + NumCaptureTypes;
+    return { Begin, End };
+  }
+
+  CaptureTypeRecordIterator capture_end() const {
+    auto Begin = getCaptureTypeRecordBuffer();
+    auto End = Begin + NumCaptureTypes;
+    return { End, End };
+  }
+
+  MetadataSourceRecordIterator source_begin() const {
+    auto Begin = getMetadataSourceRecordBuffer();
+    auto End = Begin + NumMetadataSources;
+    return { Begin, End };
+  }
+
+  MetadataSourceRecordIterator source_end() const {
+    auto Begin = getMetadataSourceRecordBuffer();
+    auto End = Begin + NumMetadataSources;
+    return { End, End };
+  }
+};
+
+class CaptureDescriptorIterator
+  : public std::iterator<std::forward_iterator_tag, CaptureDescriptor> {
+public:
+  const void *Cur;
+  const void * const End;
+  CaptureDescriptorIterator(const void *Cur, const void * const End)
+    : Cur(Cur), End(End) {}
+
+  const CaptureDescriptor &operator*() const {
+    return *reinterpret_cast<const CaptureDescriptor *>(Cur);
+  }
+
+  const CaptureDescriptor *operator->() const {
+    return reinterpret_cast<const CaptureDescriptor *>(Cur);
+  }
+
+  CaptureDescriptorIterator &operator++() {
+    const auto &CR = this->operator*();
+    const void *Next = reinterpret_cast<const char *>(Cur)
+      + sizeof(CaptureDescriptor)
+      + CR.NumCaptureTypes * sizeof(CaptureTypeRecord)
+      + CR.NumMetadataSources * sizeof(MetadataSourceRecord);
+    Cur = Next;
+    return *this;
+  }
+
+  bool operator==(CaptureDescriptorIterator const &other) const {
+    return Cur == other.Cur && End == other.End;
+  }
+
+  bool operator!=(CaptureDescriptorIterator const &other) const {
     return !(*this == other);
   }
 };

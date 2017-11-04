@@ -1,4 +1,4 @@
-// RUN: %target-parse-verify-swift
+// RUN: %target-typecheck-verify-swift
 
 class A {
   init(int i: Int) { }
@@ -110,6 +110,27 @@ func testSubUnnamed(_ i: Int, d: Double, s: String, f: Float) {
   _ = SubUnnamed(f)
 }
 
+// rdar://problem/17960407 - Inheritance of generic initializers
+class ConcreteBase {
+  required init(i: Int) {}
+}
+
+class GenericDerived<T> : ConcreteBase {}
+
+class GenericBase<T> {
+  required init(t: T) {}
+}
+
+class GenericDerived2<U> : GenericBase<(U, U)> {}
+
+class ConcreteDerived : GenericBase<Int> {}
+
+func testGenericInheritance() {
+  _ = GenericDerived<Int>(i: 10)
+  _ = GenericDerived2<Int>(t: (10, 100))
+  _ = ConcreteDerived(t: 1000)
+}
+
 // FIXME: <rdar://problem/16331406> Implement inheritance of variadic designated initializers
 class SuperVariadic {
   init(ints: Int...) { } // expected-note{{variadic superclass initializer defined here}}
@@ -121,3 +142,67 @@ class SuperVariadic {
 
 class SubVariadic : SuperVariadic { } // expected-warning 4{{synthesizing a variadic inherited initializer for subclass 'SubVariadic' is unsupported}}
 
+// Don't crash with invalid nesting of class in generic function
+
+func testClassInGenericFunc<T>(t: T) {
+  class A { init(t: T) {} } // expected-error {{type 'A' cannot be nested in generic function 'testClassInGenericFunc(t:)'}}
+  class B : A {} // expected-error {{type 'B' cannot be nested in generic function 'testClassInGenericFunc(t:)'}}
+
+  _ = B(t: t)
+}
+
+// rdar://problem/34789779
+public class Node {
+  var data : Data
+
+  public struct Data {
+    var index: Int32 = 0// for helpers
+  }
+
+ init(data: inout Data/*, context: Context*/) {
+   self.data = data
+ }
+
+ public required init(node: Node) {
+   data = node.data
+ }
+}
+
+class SubNode : Node {
+  var a: Int
+
+  required init(node: Node) {
+    a = 1
+    super.init(node: node)
+  }
+
+  init(data: inout Data, additionalParam: Int) {
+    a = additionalParam
+    super.init(data: &data)
+  }
+}
+
+class GenericSubNode<T> : SubNode {
+  required init(node: Node) {
+    super.init(node: node)
+  }
+
+  init(data: inout Data, value: T) {
+    super.init(data: &data, additionalParam: 1)
+  }
+}
+
+protocol HasValue {
+  associatedtype Value
+  func getValue() -> Value
+}
+
+class GenericWrapperNode<T : HasValue> : GenericSubNode<T.Value> {
+  required init(node: Node) {
+    super.init(node: node)
+  }
+
+  init(data: inout Data, otherValue: T) {
+    super.init(data: &data, value: otherValue.getValue())
+  }
+}

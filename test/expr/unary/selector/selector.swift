@@ -1,4 +1,4 @@
-// RUN: %target-swift-frontend(mock-sdk: %clang-importer-sdk) -disable-objc-attr-requires-foundation-module -parse %s -verify
+// RUN: %target-swift-frontend(mock-sdk: %clang-importer-sdk) -disable-objc-attr-requires-foundation-module -typecheck %s -verify
 import ObjectiveC
 
 // REQUIRES: objc_interop
@@ -15,7 +15,8 @@ class C1 {
   @objc class func method3(_ a: A, b: B) { } // expected-note{{found this candidate}}
   @objc class func method3(a: A, b: B) { } // expected-note{{found this candidate}}
 
-  @objc var a: A = A() // expected-note{{'a' declared here}}
+  @objc(ambiguous1:b:) class func ambiguous(a: A, b: A) { } // expected-note{{found this candidate}}
+  @objc(ambiguous2:b:) class func ambiguous(a: A, b: B) { } // expected-note{{found this candidate}}
 
   @objc func getC1() -> AnyObject { return self }
 
@@ -27,12 +28,12 @@ class C1 {
   }
 
   @objc func testParam(_ testParam: A) { // expected-note{{'testParam' declared here}}
-    _ = #selector(testParam) // expected-error{{argument of '#selector' cannot refer to a parameter}}
+    _ = #selector(testParam) // expected-error{{argument of '#selector' cannot refer to parameter 'testParam'}}
   }
 
   @objc func testVariable() {
     let testVariable = 1 // expected-note{{'testVariable' declared here}}
-    _ = #selector(testVariable) // expected-error{{argument of '#selector' cannot refer to a variable}}
+    _ = #selector(testVariable) // expected-error{{argument of '#selector' cannot refer to variable 'testVariable'}}
   }
 }
 
@@ -42,7 +43,7 @@ class C1 {
 }
 
 extension C1 {
-  final func method6() { } // expected-note{{add '@objc' to expose this method to Objective-C}}{{3-3=@objc }}
+  final func method6() { } // expected-note{{add '@objc' to expose this instance method to Objective-C}}{{3-3=@objc }}
 }
 
 func testSelector(_ c1: C1, p1: P1, obj: AnyObject) {
@@ -67,8 +68,8 @@ func testSelector(_ c1: C1, p1: P1, obj: AnyObject) {
   _ = #selector(P1.method5(_:b:)) // expected-error{{static member 'method5(_:b:)' cannot be used on protocol metatype 'P1.Protocol'}}
   _ = #selector(p1.method4)
   _ = #selector(p1.method4(_:b:))
-  _ = #selector(p1.dynamicType.method5)
-  _ = #selector(p1.dynamicType.method5(_:b:))
+  _ = #selector(type(of: p1).method5)
+  _ = #selector(type(of: p1).method5(_:b:))
 
   // Interesting expressions that refer to methods.
   _ = #selector(Swift.AnyObject.method1)
@@ -82,23 +83,22 @@ func testSelector(_ c1: C1, p1: P1, obj: AnyObject) {
   let sel2: Selector
   sel2 = sel1
   _ = sel2
+
+  let dict: [Selector: Int] = [:]
+  let _: Int? = dict[#selector(c1.method1)]
 }
 
 func testAmbiguity() {
-  _ = #selector(C1.method3) // expected-error{{ambiguous use of 'method3(_:b:)'}}
+  _ = #selector(C1.method3) // expected-error{{ambiguous use of 'method3'}}
+  _ = #selector(C1.ambiguous) // expected-error{{ambiguous use of 'ambiguous(a:b:)'}}
 }
 
 func testUnusedSelector() {
     #selector(C1.getC1) // expected-warning{{result of '#selector' is unused}}
 }
 
-func testProperties(_ c1: C1) {
-  _ = #selector(c1.a) // expected-error{{argument of '#selector' cannot refer to a property}}
-  _ = #selector(C1.a) // FIXME poor diagnostic: expected-error{{instance member 'a' cannot be used on type 'C1'}}
-}
-
 func testNonObjC(_ c1: C1) {
-  _ = #selector(c1.method6) // expected-error{{argument of '#selector' refers to a method that is not exposed to Objective-C}}
+  _ = #selector(c1.method6) // expected-error{{argument of '#selector' refers to instance method 'method6()' that is not exposed to Objective-C}}
 }
 
 func testParseErrors1() {
@@ -115,8 +115,31 @@ func testParseErrors3(_ c1: C1) {
 }
 
 func testParseErrors4() {
-  // Subscripts
-  _ = #selector(C1.subscript) // expected-error{{expected member name following '.'}}
-  // expected-error@-1{{consecutive statements on a line must be separated by ';'}}
-  // expected-error@-2{{expected '(' for subscript parameters}}
+  _ = #selector(C1.subscript) // expected-error{{type 'C1' has no member 'subscript'}}
+}
+
+// SR-1827
+
+let optionalSel: Selector? = nil
+
+switch optionalSel {
+case #selector(C1.method1)?:
+  break
+default:
+  break
+}
+
+@objc class SR1827 {
+  @objc func bar() {}
+}
+
+switch optionalSel {
+case #selector(SR1827.bar): // expected-error{{expression pattern of type 'Selector' cannot match values of type 'Selector?'}} {{27-27=?}}
+  break
+case #selector(SR1827.bar)!: // expected-error{{cannot force unwrap value of non-optional type 'Selector'}}
+  break
+case #selector(SR1827.bar)?:
+  break
+default:
+  break
 }
