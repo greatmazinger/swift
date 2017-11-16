@@ -13,7 +13,8 @@
 #ifndef SWIFT_SYNTAX_PARSING_CONTEXT_H
 #define SWIFT_SYNTAX_PARSING_CONTEXT_H
 
- #include "swift/Syntax/Syntax.h"
+#include "swift/Basic/SourceLoc.h"
+#include "swift/Syntax/Syntax.h"
 
 namespace swift {
   class SourceLoc;
@@ -25,19 +26,34 @@ namespace syntax {
   struct RawSyntax;
   enum class SyntaxKind;
 
+enum class SyntaxContextKind: uint8_t{
+  Expr,
+  Decl,
+  Stmt,
+};
+
 /// The handler for parser to generate libSyntax entities.
 struct RawSyntaxInfo {
-  /// Start location of this syntax node.
-  SourceLoc StartLoc;
+  /// Start and end location of this syntax node.
+  SourceRange SyntaxRange;
 
-  /// The number of tokens belong to the syntax node.
-  unsigned TokCount;
+  /// This location must be valid if this node is an implicit node, e.g.
+  /// an empty statement list collection.
+  /// This location indicates the implicit node should appear before the token
+  /// on the location.
+  SourceLoc BeforeLoc;
 
   /// The raw node.
   RC<RawSyntax> RawNode;
+  RawSyntaxInfo(RC<RawSyntax> RawNode): RawNode(RawNode) {}
   RawSyntaxInfo(SourceLoc StartLoc, RC<RawSyntax> RawNode):
-    RawSyntaxInfo(StartLoc, 1, RawNode) {}
-  RawSyntaxInfo(SourceLoc StartLoc, unsigned TokCount, RC<RawSyntax> RawNode);
+    SyntaxRange(StartLoc), RawNode(RawNode) {}
+  RawSyntaxInfo(SourceRange SyntaxRange, RC<RawSyntax> RawNode):
+    SyntaxRange(SyntaxRange), RawNode(RawNode) {}
+
+  bool isImplicit() const { return SyntaxRange.isInvalid(); }
+  SourceLoc getStartLoc() const { return SyntaxRange.Start; }
+  SourceLoc getEndLoc() const { return SyntaxRange.End; }
 
   template <typename SyntaxNode>
   SyntaxNode makeSyntax() const { return make<SyntaxNode>(RawNode); }
@@ -45,6 +61,11 @@ struct RawSyntaxInfo {
   template <typename RawSyntaxNode>
   RC<RawSyntaxNode> getRaw() const {
     return RC<RawSyntaxNode>(cast<RawSyntaxNode>(RawNode));
+  }
+  void brigeWithContext(SyntaxContextKind Kind);
+  void setBeforeLoc(SourceLoc Loc) {
+    assert(isImplicit());
+    BeforeLoc = Loc;
   }
 };
 
@@ -64,17 +85,15 @@ public:
   ContextInfo &ContextData;
   const Token &Tok;
 
-  // Add a token syntax at the given source location to the context; this
-  // token node can be used to build more complex syntax nodes in later call
-  // back.
-  virtual void addTokenSyntax(SourceLoc Loc) = 0;
-
   // Get the context kind.
   virtual SyntaxParsingContextKind getKind() = 0;
 
   // Create a syntax node of the given kind.
-  virtual void makeNode(SyntaxKind Kind) = 0;
+  virtual void makeNode(SyntaxKind Kind, SourceLoc LastTokLoc) = 0;
   virtual ~SyntaxParsingContext();
+  virtual void setSyntaxKind(SyntaxKind Kind) = 0;
+  virtual void setContextKind(SyntaxContextKind CKind) = 0;
+  virtual void finalize() = 0;
 
   // Disable the building of syntax tree in the current context.
   void disable();
@@ -89,16 +108,13 @@ public:
   SyntaxParsingContextRoot(SourceFile &File, unsigned BufferID, Token &Tok):
     SyntaxParsingContext(File, BufferID, Tok), File(File) {}
   ~SyntaxParsingContextRoot();
-  void addTokenSyntax(SourceLoc Loc) override {};
-  void makeNode(SyntaxKind Kind) override {};
+  void makeNode(SyntaxKind Kind, SourceLoc LastTokLoc) override {};
+  void setSyntaxKind(SyntaxKind Kind) override {};
+  void setContextKind(SyntaxContextKind CKind) override {};
+  void finalize() override {};
   SyntaxParsingContextKind getKind() override {
     return SyntaxParsingContextKind::Root;
   };
-};
-
-enum class SyntaxContextKind: uint8_t{
-  Expr,
-  Decl,
 };
 
 // The base class for contexts that are created from a parent context.
@@ -108,14 +124,31 @@ enum class SyntaxContextKind: uint8_t{
 class SyntaxParsingContextChild: public SyntaxParsingContext {
   SyntaxParsingContext *Parent;
   SyntaxParsingContext *&ContextHolder;
-  const SyntaxContextKind Kind;
+  Optional<SyntaxContextKind> ContextKind;
+  Optional<SyntaxKind> KnownSyntax;
+  void makeNodeWhole(SyntaxKind Kind);
+  SyntaxParsingContextChild(SyntaxParsingContext *&ContextHolder,
+                            Optional<SyntaxContextKind> Kind,
+                            Optional<SyntaxKind> KnownSyntax);
+  bool isTopOfContextStack() const { return this == ContextHolder; }
 public:
   SyntaxParsingContextChild(SyntaxParsingContext *&ContextHolder,
-                            SyntaxContextKind Kind);
+    SyntaxContextKind Kind): SyntaxParsingContextChild(ContextHolder,
+                                                       Kind, None) {}
+
+  SyntaxParsingContextChild(SyntaxParsingContext *&ContextHolder,
+    SyntaxKind KnownSyntax): SyntaxParsingContextChild(ContextHolder,
+                             None, KnownSyntax) {};
+
+  SyntaxParsingContextChild(SyntaxParsingContext *&ContextHolder,
+                            bool Disable = false);
+
   ~SyntaxParsingContextChild();
-  void makeNode(SyntaxKind Kind) override;
-  void addTokenSyntax(SourceLoc Loc) override;
+  void makeNode(SyntaxKind Kind, SourceLoc LastTokLoc) override;
+  void finalize() override;
   SyntaxParsingContext* getParent() { return Parent; }
+  void setSyntaxKind(SyntaxKind SKind) override;
+  void setContextKind(SyntaxContextKind CKind) override;
   SyntaxParsingContextRoot &getRoot();
   SyntaxParsingContextKind getKind() override {
     return SyntaxParsingContextKind::Child;

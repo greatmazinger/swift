@@ -196,10 +196,13 @@ CanSILFunctionType Lowering::adjustFunctionType(
       type->getWitnessMethodConformanceOrNone() == witnessMethodConformance)
     return type;
 
-  return SILFunctionType::get(type->getGenericSignature(), extInfo, callee,
-                              type->getParameters(), type->getResults(),
+  return SILFunctionType::get(type->getGenericSignature(),
+                              extInfo, type->getCoroutineKind(), callee,
+                              type->getParameters(), type->getYields(),
+                              type->getResults(),
                               type->getOptionalErrorResult(),
-                              type->getASTContext(), witnessMethodConformance);
+                              type->getASTContext(),
+                              witnessMethodConformance);
 }
 
 namespace {
@@ -878,9 +881,8 @@ static CanSILFunctionType getSILFunctionType(
     for (auto capture : loweredCaptures.getCaptures()) {
       if (capture.isDynamicSelfMetadata()) {
         ParameterConvention convention = ParameterConvention::Direct_Unowned;
-        auto dynamicSelfInterfaceType = GenericEnvironment::mapTypeOutOfContext(
-          function->getGenericEnvironment(),
-          loweredCaptures.getDynamicSelfType());
+        auto dynamicSelfInterfaceType =
+            loweredCaptures.getDynamicSelfType()->mapTypeOutOfContext();
         
         auto selfMetatype = MetatypeType::get(
             dynamicSelfInterfaceType,
@@ -960,7 +962,8 @@ static CanSILFunctionType getSILFunctionType(
     .withIsPseudogeneric(pseudogeneric)
     .withNoEscape(extInfo.isNoEscape());
   
-  return SILFunctionType::get(genericSig, silExtInfo, calleeConvention, inputs,
+  return SILFunctionType::get(genericSig, silExtInfo, SILCoroutineKind::None,
+                              calleeConvention, inputs, /*yields*/ {},
                               results, errorResult, M.getASTContext(),
                               witnessMethodConformance);
 }
@@ -1777,7 +1780,7 @@ static bool isImporterGeneratedAccessor(const clang::Decl *clangDecl,
     return false;
 
   // Must be a type member.
-  if (constant.getUncurryLevel() != 1)
+  if (constant.getParameterListCount() != 2)
     return false;
 
   // Must be imported from a function.
@@ -2005,20 +2008,6 @@ SILParameterInfo TypeConverter::getConstantSelfParameter(SILDeclRef constant) {
   return ty->getParameters().back();
 }
 
-static bool requiresNewVTableEntry(SILDeclRef method) {
-  if (cast<AbstractFunctionDecl>(method.getDecl())->needsNewVTableEntry())
-    return true;
-  if (method.kind == SILDeclRef::Kind::Allocator) {
-    auto *ctor = cast<ConstructorDecl>(method.getDecl());
-    if (ctor->isRequired()) {
-      if (!ctor->getOverriddenDecl()->isRequired()
-          || ctor->getOverriddenDecl()->hasClangNode())
-        return true;
-    }
-  }
-  return false;
-}
-
 // This check duplicates TypeConverter::checkForABIDifferences(),
 // but on AST types. The issue is we only want to introduce a new
 // vtable thunk if the AST type changes, but an abstraction change
@@ -2034,7 +2023,7 @@ SILDeclRef TypeConverter::getOverriddenVTableEntry(SILDeclRef method) {
   SILDeclRef cur = method, next = method;
   do {
     cur = next;
-    if (requiresNewVTableEntry(cur))
+    if (cur.requiresNewVTableEntry())
       return cur;
     next = cur.getNextOverriddenVTableEntry();
   } while (next);
@@ -2112,7 +2101,7 @@ TypeConverter::getConstantOverrideInfo(SILDeclRef derived, SILDeclRef base) {
   if (found != ConstantOverrideTypes.end())
     return *found->second;
 
-  assert(requiresNewVTableEntry(base) && "base must not be an override");
+  assert(base.requiresNewVTableEntry() && "base must not be an override");
 
   auto baseInfo = getConstantInfo(base);
   auto derivedInfo = getConstantInfo(derived);
@@ -2235,6 +2224,12 @@ namespace {
         substParams.push_back(subst(origParam));
       }
 
+      SmallVector<SILYieldInfo, 8> substYields;
+      substYields.reserve(origType->getYields().size());
+      for (auto &origYield : origType->getYields()) {
+        substYields.push_back(subst(origYield));
+      }
+
       Optional<ProtocolConformanceRef> witnessMethodConformance;
       if (auto conformance = origType->getWitnessMethodConformanceOrNone()) {
         assert(origType->getExtInfo().hasSelfParam());
@@ -2253,8 +2248,9 @@ namespace {
       }
 
       return SILFunctionType::get(nullptr, origType->getExtInfo(),
+                                  origType->getCoroutineKind(),
                                   origType->getCalleeConvention(), substParams,
-                                  substResults, substErrorResult,
+                                  substYields, substResults, substErrorResult,
                                   getASTContext(), witnessMethodConformance);
     }
 
@@ -2265,6 +2261,10 @@ namespace {
 
     SILResultInfo subst(SILResultInfo orig) {
       return SILResultInfo(visit(orig.getType()), orig.getConvention());
+    }
+
+    SILYieldInfo subst(SILYieldInfo orig) {
+      return SILYieldInfo(visit(orig.getType()), orig.getConvention());
     }
 
     SILParameterInfo subst(SILParameterInfo orig) {
@@ -2486,7 +2486,7 @@ getAbstractionPatternForConstant(ASTContext &ctx, SILDeclRef constant,
 TypeConverter::LoweredFormalTypes
 TypeConverter::getLoweredFormalTypes(SILDeclRef constant,
                                      CanAnyFunctionType fnType) {
-  unsigned uncurryLevel = constant.getUncurryLevel();
+  unsigned uncurryLevel = constant.getParameterListCount() - 1;
   auto extInfo = fnType->getExtInfo();
 
   // Form an abstraction pattern for bridging purposes.

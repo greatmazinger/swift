@@ -330,7 +330,6 @@ getWitnessTableForComputedComponent(IRGenModule &IGM,
     
     auto linkInfo = LinkInfo::get(IGM, "swift_keyPathGenericWitnessTable",
                                   SILLinkage::PublicExternal,
-                                  /*sil only*/ false,
                                   NotForDefinition,
                                   /*weak imported*/ false);
     
@@ -699,11 +698,6 @@ IRGenModule::getAddrOfKeyPathPattern(KeyPathPattern *pattern,
   // the final object.
   fields.add(emitMetadataGenerator(rootTy));
   fields.add(emitMetadataGenerator(valueTy));
-  
-  // TODO: 32-bit heap object header still has an extra word
-  if (SizeTy == Int32Ty) {
-    fields.addInt32(0);
-  }
   
 #ifndef NDEBUG
   auto endOfObjectHeader = fields.getNextOffsetFromGlobal();

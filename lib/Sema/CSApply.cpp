@@ -849,7 +849,9 @@ namespace {
       // Class members might be virtually dispatched, so we need to know
       // the full layout of the class.
       if (auto *classDecl = dyn_cast<ClassDecl>(member->getDeclContext()))
-        tc.requestClassLayout(classDecl);
+        tc.requestNominalLayout(classDecl);
+      if (auto *protocolDecl = dyn_cast<ProtocolDecl>(member->getDeclContext()))
+        tc.requestNominalLayout(protocolDecl);
 
       auto refTy = solution.simplifyType(openedFullType);
 
@@ -1318,23 +1320,29 @@ namespace {
       
       // Apply a key path if we have one.
       if (choice.getKind() == OverloadChoiceKind::KeyPathApplication) {
+        auto applicationTy = simplifyType(selected->openedType)
+          ->castTo<FunctionType>();
+                
         index = cs.coerceToRValue(index);
         // The index argument should be (keyPath: KeyPath<Root, Value>).
         // Dig the key path expression out of the argument tuple.
         auto indexKP = cast<TupleExpr>(index)->getElement(0);
-        auto keyPathTTy = cs.getType(indexKP);
-
+        auto keyPathExprTy = cs.getType(indexKP);
+        auto keyPathTy = applicationTy->getInput()->castTo<TupleType>()
+          ->getElementType(0);
+        
         // Check for the KeyPath being an IUO
-        if (auto pathTy = cs.lookThroughImplicitlyUnwrappedOptionalType(keyPathTTy)) {
-          keyPathTTy = pathTy;
-          indexKP = coerceImplicitlyUnwrappedOptionalToValue(indexKP, keyPathTTy, locator);
+        if (auto pathTy = cs.lookThroughImplicitlyUnwrappedOptionalType(keyPathExprTy)) {
+          keyPathExprTy = pathTy;
+          indexKP = coerceImplicitlyUnwrappedOptionalToValue(
+            indexKP, keyPathExprTy, locator);
         }
 
         Type valueTy;
         Type baseTy;
         bool resultIsLValue;
         
-        if (auto nom = keyPathTTy->getAs<NominalType>()) {
+        if (auto nom = keyPathTy->getAs<NominalType>()) {
           // AnyKeyPath is <T> rvalue T -> rvalue Any?
           if (nom->getDecl() == cs.getASTContext().getAnyKeyPathDecl()) {
             valueTy = ProtocolCompositionType::get(cs.getASTContext(), {},
@@ -1343,12 +1351,25 @@ namespace {
             resultIsLValue = false;
             base = cs.coerceToRValue(base);
             baseTy = cs.getType(base);
+            // We don't really want to attempt AnyKeyPath application
+            // if we know a more specific key path type is being applied.
+            if (!keyPathTy->isEqual(keyPathExprTy)) {
+              cs.TC.diagnose(base->getLoc(),
+                             diag::expr_smart_keypath_application_type_mismatch,
+                             keyPathExprTy,
+                             baseTy)
+                .highlight(index->getSourceRange());
+            }
           } else {
             llvm_unreachable("unknown key path class!");
           }
         } else {
-          auto keyPathBGT = keyPathTTy->castTo<BoundGenericType>();
+          auto keyPathBGT = keyPathTy->castTo<BoundGenericType>();
           baseTy = keyPathBGT->getGenericArgs()[0];
+          
+          // Coerce the base to the key path's expected base type.
+          if (!baseTy->isEqual(cs.getType(base)->getRValueType()))
+            base = coerceToType(base, baseTy, locator);
 
           if (keyPathBGT->getDecl()
                 == cs.getASTContext().getPartialKeyPathDecl()) {
@@ -1376,12 +1397,6 @@ namespace {
             } else {
               llvm_unreachable("unknown key path class!");
             }
-          }
-
-          // Coerce the base if its anticipated type doesn't match - say we're
-          // applying a keypath with an existential base to a concrete base.
-          if (baseTy->isExistentialType() && !cs.getType(base)->isExistentialType()) {
-            base = coerceToType(base, baseTy, locator);
           }
         }
         if (resultIsLValue)
@@ -7527,6 +7542,16 @@ bool ConstraintSystem::applySolutionFix(Expr *expr,
                                                         DC);
     if (!useAs && !useAsBang)
       return false;
+    
+    // If we're performing pattern matching, "as" means something completely different...
+    if (auto binOpExpr = dyn_cast<BinaryExpr>(expr)) {
+      auto overloadedFn = dyn_cast<OverloadedDeclRefExpr>(binOpExpr->getFn());
+      if (overloadedFn && overloadedFn->getDecls().size() > 0) {
+        ValueDecl *decl0 = overloadedFn->getDecls()[0];
+        if (decl0->getBaseName() == decl0->getASTContext().Id_MatchOperator)
+          return false;
+      }
+    }
 
     bool needsParensInside = exprNeedsParensBeforeAddingAs(TC, DC, affected);
     bool needsParensOutside = exprNeedsParensAfterAddingAs(TC, DC, affected,

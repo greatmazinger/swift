@@ -347,12 +347,6 @@ static bool createsInfiniteSpecializationLoop(ApplySite Apply) {
 
 static bool shouldNotSpecializeCallee(SILFunction *Callee,
                                       SubstitutionList Subs = {}) {
-  if (!Callee->shouldOptimize()) {
-    DEBUG(llvm::dbgs() << "    Cannot specialize function " << Callee->getName()
-          << " marked to be excluded from optimizations.\n");
-    return true;
-  }
-
   if (Callee->hasSemanticsAttr("optimize.sil.specialize.generic.never"))
     return true;
 
@@ -721,8 +715,10 @@ ReabstractionInfo::createSubstitutedType(SILFunction *OrigF,
 
   // Use the new specialized generic signature.
   auto NewFnTy = SILFunctionType::get(
-      CanSpecializedGenericSig, FnTy->getExtInfo(), FnTy->getCalleeConvention(),
-      FnTy->getParameters(), FnTy->getResults(), FnTy->getOptionalErrorResult(),
+      CanSpecializedGenericSig, FnTy->getExtInfo(),
+      FnTy->getCoroutineKind(), FnTy->getCalleeConvention(),
+      FnTy->getParameters(), FnTy->getYields(),
+      FnTy->getResults(), FnTy->getOptionalErrorResult(),
       M.getASTContext(), FnTy->getWitnessMethodConformanceOrNone());
 
   // This is an interface type. It should not have any archetypes.
@@ -735,6 +731,7 @@ ReabstractionInfo::createSubstitutedType(SILFunction *OrigF,
 CanSILFunctionType ReabstractionInfo::
 createSpecializedType(CanSILFunctionType SubstFTy, SILModule &M) const {
   llvm::SmallVector<SILResultInfo, 8> SpecializedResults;
+  llvm::SmallVector<SILYieldInfo, 8> SpecializedYields;
   llvm::SmallVector<SILParameterInfo, 8> SpecializedParams;
 
   unsigned IndirectResultIdx = 0;
@@ -769,9 +766,15 @@ createSpecializedType(CanSILFunctionType SubstFTy, SILModule &M) const {
       SpecializedParams.push_back(PI);
     }
   }
+  for (SILYieldInfo YI : SubstFTy->getYields()) {
+    // For now, always just use the original, substituted parameter info.
+    SpecializedYields.push_back(YI);
+  }
   return SILFunctionType::get(
-      SubstFTy->getGenericSignature(), SubstFTy->getExtInfo(),
-      SubstFTy->getCalleeConvention(), SpecializedParams, SpecializedResults,
+      SubstFTy->getGenericSignature(),
+      SubstFTy->getExtInfo(), SubstFTy->getCoroutineKind(),
+      SubstFTy->getCalleeConvention(),
+      SpecializedParams, SpecializedYields, SpecializedResults,
       SubstFTy->getOptionalErrorResult(), M.getASTContext(),
       SubstFTy->getWitnessMethodConformanceOrNone());
 }
@@ -1391,10 +1394,7 @@ void FunctionSignaturePartialSpecializer::
 
     // Add a same type requirement based on the provided generic parameter
     // substitutions.
-    auto ReplacementCallerInterfaceTy = Replacement;
-    if (CallerGenericEnv)
-      ReplacementCallerInterfaceTy =
-          CallerGenericEnv->mapTypeOutOfContext(Replacement);
+    auto ReplacementCallerInterfaceTy = Replacement->mapTypeOutOfContext();
 
     auto SpecializedReplacementCallerInterfaceTy =
         ReplacementCallerInterfaceTy.subst(
@@ -1534,8 +1534,8 @@ void FunctionSignaturePartialSpecializer::computeCallerInterfaceSubs(
         // First, map callee's interface type to specialized interface type.
         auto Ty = Type(type).subst(CalleeInterfaceToSpecializedInterfaceMap);
         Type SpecializedInterfaceTy =
-            SpecializedGenericEnv->mapTypeOutOfContext(
-                SpecializedGenericEnv->mapTypeIntoContext(Ty));
+          SpecializedGenericEnv->mapTypeIntoContext(Ty)
+            ->mapTypeOutOfContext();
         assert(!SpecializedInterfaceTy->hasError());
         return SpecializedInterfaceTy;
       },
@@ -1832,12 +1832,10 @@ void ReabstractionInfo::verify() const {
 /// Create a new specialized function if possible, and cache it.
 SILFunction *GenericFuncSpecializer::tryCreateSpecialization() {
   // Do not create any new specializations at Onone.
-  if (M.getOptions().Optimization <= SILOptions::SILOptMode::None)
+  if (!GenericFunc->shouldOptimize())
     return nullptr;
 
-  DEBUG(
-    if (M.getOptions().Optimization <= SILOptions::SILOptMode::Debug) {
-      llvm::dbgs() << "Creating a specialization: " << ClonedName << "\n"; });
+  DEBUG(llvm::dbgs() << "Creating a specialization: " << ClonedName << "\n";);
 
   ReInfo.verify();
 

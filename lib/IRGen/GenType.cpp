@@ -1358,7 +1358,7 @@ ArchetypeType *TypeConverter::getExemplarArchetype(ArchetypeType *t) {
 
   // Map the archetype out of its own generic environment and into the
   // canonical generic environment.
-  auto interfaceType = genericEnv->mapTypeOutOfContext(t);
+  auto interfaceType = t->getInterfaceType();
   auto exemplar = canGenericEnv->mapTypeIntoContext(interfaceType)
                     ->castTo<ArchetypeType>();
   assert(isExemplarArchetype(exemplar));
@@ -1636,6 +1636,8 @@ TypeCacheEntry TypeConverter::convertType(CanType ty) {
     return convertBlockStorageType(cast<SILBlockStorageType>(ty));
   case TypeKind::SILBox:
     return convertBoxType(cast<SILBoxType>(ty));
+  case TypeKind::SILToken:
+    llvm_unreachable("should not be asking for representation of a SILToken");
   }
   }
   llvm_unreachable("bad type kind");

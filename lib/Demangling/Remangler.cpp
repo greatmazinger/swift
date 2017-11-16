@@ -579,6 +579,8 @@ void Remangler::mangleBuiltinTypeName(Node *node) {
     Buffer << 'o';
   } else if (text == "Builtin.RawPointer") {
     Buffer << 'p';
+  } else if (text == "Builtin.SILToken") {
+    Buffer << 't';
   } else if (text == "Builtin.Word") {
     Buffer << 'w';
   } else if (stripPrefix(text, "Builtin.Int")) {
@@ -1709,6 +1711,11 @@ void Remangler::mangleReflectionMetadataSuperclassDescriptor(Node *node) {
 void Remangler::mangleCurryThunk(Node *node) {
   mangleSingleChildNode(node);
   Buffer << "Tc";
+}
+
+void Remangler::mangleDispatchThunk(Node *node) {
+  mangleSingleChildNode(node);
+  Buffer << "Tj";
 }
 
 void Remangler::mangleThrowsAnnotation(Node *node) {

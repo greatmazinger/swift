@@ -2198,6 +2198,8 @@ namespace {
     conformance->setState(ProtocolConformanceState::Checking);
     SWIFT_DEFER { conformance->setState(ProtocolConformanceState::Complete); };
 
+    TC.validateDecl(Proto);
+
     // If the protocol itself is invalid, there's nothing we can do.
     if (Proto->isInvalid()) {
       conformance->setInvalid();
@@ -2348,25 +2350,14 @@ static Type getRequirementTypeForDisplay(ModuleDecl *module,
   // Replace generic type parameters and associated types with their
   // witnesses, when we have them.
   auto selfTy = conformance->getProtocol()->getSelfInterfaceType();
-  type = type.transform([&](Type type) -> Type {
-    // If a dependent member refers to an associated type, replace it.
-    if (auto member = type->getAs<DependentMemberType>()) {
-      if (member->getBase()->isEqual(selfTy)) {
-        // FIXME: Could handle inherited conformances here.
-        if (conformance->hasTypeWitness(member->getAssocType()))
-          return conformance->getTypeWitness(member->getAssocType(), nullptr);
-      }
-    }
+  return type.subst([&](SubstitutableType *dependentType) {
+                      if (dependentType->isEqual(selfTy))
+                        return conformance->getType();
 
-    // Replace 'Self' with the conforming type.
-    if (type->isEqual(selfTy))
-      return conformance->getType();
-
-    return type;
-  });
-
-  //
-  return type;
+                      return Type(dependentType);
+                    },
+                    LookUpConformanceInModule(module),
+                    SubstFlags::UseErrorType);
 }
 
 /// \brief Retrieve the kind of requirement described by the given declaration,
@@ -3626,6 +3617,11 @@ ResolveWitnessResult ConformanceChecker::resolveTypeWitnessViaLookup(
     // Skip nested generic types.
     if (auto *genericDecl = dyn_cast<GenericTypeDecl>(candidate.first))
       if (genericDecl->getGenericParams())
+        continue;
+
+    // Skip typealiases with an unbound generic type as their underlying type.
+    if (auto *typeAliasDecl = dyn_cast<TypeAliasDecl>(candidate.first))
+      if (typeAliasDecl->getDeclaredInterfaceType()->is<UnboundGenericType>())
         continue;
 
     // Check this type against the protocol requirements.
@@ -5865,7 +5861,7 @@ Optional<ProtocolConformanceRef> TypeChecker::conformsToProtocol(
       !T->castTo<ArchetypeType>()->requiresClass() &&
       T->castTo<ArchetypeType>()->getGenericEnvironment()
         == DC->getGenericEnvironmentOfContext()) {
-    auto interfaceType = DC->mapTypeOutOfContext(T);
+    auto interfaceType = T->mapTypeOutOfContext();
     if (interfaceType->isTypeParameter()) {
       auto genericSig = DC->getGenericSignatureOfContext();
       auto path = genericSig->getConformanceAccessPath(interfaceType, Proto);
@@ -6351,6 +6347,24 @@ static bool isGeneric(ValueDecl *decl) {
   return false;
 }
 
+/// Determine whether this is an unlabeled initializer or subscript.
+static bool isUnlabeledInitializerOrSubscript(ValueDecl *value) {
+  ParameterList *paramList = nullptr;
+  if (auto constructor = dyn_cast<ConstructorDecl>(value))
+    paramList = constructor->getParameterList(1);
+  else if (auto subscript = dyn_cast<SubscriptDecl>(value))
+    paramList = subscript->getIndices();
+  else
+    return false;
+
+  for (auto param : *paramList) {
+    if (!param->getArgumentName().empty()) return false;
+  }
+
+  return true;
+}
+
+/// Determine whether this declaration is an initializer
 /// Determine whether we should warn about the given witness being a close
 /// match for the given optional requirement.
 static bool shouldWarnAboutPotentialWitness(
@@ -6384,6 +6398,12 @@ static bool shouldWarnAboutPotentialWitness(
     if (auto attr = witness->getAttrs().getAttribute<AccessControlAttr>())
       if (!attr->isImplicit()) return false;
   }
+
+  // Don't warn if the requirement or witness is an initializer or subscript
+  // with no argument labels.
+  if (isUnlabeledInitializerOrSubscript(req) ||
+      isUnlabeledInitializerOrSubscript(witness))
+    return false;
 
   // If the score is relatively high, don't warn: this is probably
   // unrelated.  Allow about one typo for every four properly-typed

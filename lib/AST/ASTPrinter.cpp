@@ -487,7 +487,7 @@ class PrintAST : public ASTVisitor<PrintAST> {
       if (T->hasArchetype()) {
         // Get the interface type, since TypeLocs still have
         // contextual types in them.
-        T = Current->getInnermostDeclContext()->mapTypeOutOfContext(T);
+        T = T->mapTypeOutOfContext();
       }
 
       auto *M = Current->getDeclContext()->getParentModule();
@@ -3255,6 +3255,10 @@ public:
     }
   }
 
+  void visitSILTokenType(SILTokenType *T) {
+    Printer << "Builtin.SILToken";
+  }
+
   void visitNameAliasType(NameAliasType *T) {
     if (Options.PrintForSIL || Options.PrintNameAliasUnderlyingType) {
       visit(T->getSinglyDesugaredType());
@@ -3630,6 +3634,20 @@ public:
     Printer.printStructurePost(PrintStructureKind::FunctionReturnType);
   }
 
+  void printSILCoroutineKind(SILCoroutineKind kind) {
+    switch (kind) {
+    case SILCoroutineKind::None:
+      return;
+    case SILCoroutineKind::YieldOnce:
+      Printer << "@yield_once ";
+      return;
+    case SILCoroutineKind::YieldMany:
+      Printer << "@yield_many ";
+      return;
+    }
+    llvm_unreachable("bad convention");
+  }
+
   void printCalleeConvention(ParameterConvention conv) {
     switch (conv) {
     case ParameterConvention::Direct_Unowned:
@@ -3651,6 +3669,7 @@ public:
   }
 
   void visitSILFunctionType(SILFunctionType *T) {
+    printSILCoroutineKind(T->getCoroutineKind());
     printFunctionExtInfo(T->getExtInfo(),
                          T->getWitnessMethodConformanceOrNone());
     printCalleeConvention(T->getCalleeConvention());
@@ -3669,11 +3688,19 @@ public:
     }
     Printer << ") -> ";
 
-    unsigned totalResults = T->getNumResults() + unsigned(T->hasErrorResult());
+    unsigned totalResults =
+      T->getNumYields() + T->getNumResults() + unsigned(T->hasErrorResult());
 
     if (totalResults != 1) Printer << "(";
 
     first = true;
+
+    for (auto yield : T->getYields()) {
+      Printer.printSeparator(first, ", ");
+      Printer << "@yields ";
+      yield.print(Printer, Options);
+    }
+
     for (auto result : T->getResults()) {
       Printer.printSeparator(first, ", ");
       result.print(Printer, Options);

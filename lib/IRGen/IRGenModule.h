@@ -24,6 +24,7 @@
 #include "swift/Basic/LLVM.h"
 #include "swift/Basic/ClusteredBitVector.h"
 #include "swift/Basic/SuccessorMap.h"
+#include "swift/Basic/OptimizationMode.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/Hashing.h"
@@ -446,6 +447,7 @@ public:
     llvm::PointerType *WitnessTablePtrTy;
   };
   llvm::StructType *RefCountedStructTy;/// %swift.refcounted = type { ... }
+  Size RefCountedStructSize;     /// sizeof(%swift.refcounted)
   llvm::PointerType *RefCountedPtrTy;  /// %swift.refcounted*
   llvm::PointerType *WeakReferencePtrTy;/// %swift.weak_reference*
   llvm::PointerType *UnownedReferencePtrTy;/// %swift.unowned_reference*
@@ -491,6 +493,8 @@ public:
   llvm::PointerType *ErrorPtrTy;       /// %swift.error*
   llvm::StructType *OpenedErrorTripleTy; /// { %swift.opaque*, %swift.type*, i8** }
   llvm::PointerType *OpenedErrorTriplePtrTy; /// { %swift.opaque*, %swift.type*, i8** }*
+  llvm::PointerType *WitnessTablePtrPtrTy;   /// i8***
+  llvm::StructType *WitnessTableSliceTy;     /// { witness_table**, i64 }
 
   /// Used to create unique names for class layout types with tail allocated
   /// elements.
@@ -954,7 +958,9 @@ public:
   /// invalid.
   bool finalize();
 
-  void constructInitialFnAttributes(llvm::AttrBuilder &Attrs);
+  void constructInitialFnAttributes(llvm::AttrBuilder &Attrs,
+                                    OptimizationMode FuncOptMode =
+                                      OptimizationMode::NotSet);
   llvm::AttributeList constructInitialAttributes();
 
   void emitProtocolDecl(ProtocolDecl *D);

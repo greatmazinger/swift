@@ -73,7 +73,7 @@ using namespace irgen;
 bool IRGenerator::tryEnableLazyTypeMetadata(NominalTypeDecl *Nominal) {
   // When compiling with -Onone keep all metadata for the debugger. Even if it
   // is not used by the program itself.
-  if (!Opts.Optimize)
+  if (!Opts.shouldOptimize())
     return false;
 
   switch (Nominal->getKind()) {
@@ -1329,7 +1329,7 @@ static std::tuple<llvm::GlobalValue::LinkageTypes,
                   llvm::GlobalValue::VisibilityTypes,
                   llvm::GlobalValue::DLLStorageClassTypes>
 getIRLinkage(const UniversalLinkageInfo &info, SILLinkage linkage,
-             bool isSILOnly, ForDefinition_t isDefinition,
+             ForDefinition_t isDefinition,
              bool isWeakImported) {
 #define RESULT(LINKAGE, VISIBILITY, DLL_STORAGE)                               \
   std::make_tuple(llvm::GlobalValue::LINKAGE##Linkage,                         \
@@ -1352,19 +1352,6 @@ getIRLinkage(const UniversalLinkageInfo &info, SILLinkage linkage,
 
   switch (linkage) {
   case SILLinkage::Public:
-    // Don't code-gen transparent functions. Internal linkage will enable llvm
-    // to delete transparent functions except they are referenced from somewhere
-    // (i.e. the function pointer is taken).
-    //
-    // In case we are generating multiple LLVM modules, we still have to use
-    // ExternalLinkage so that modules can cross-reference transparent
-    // functions.
-    //
-    // TODO: In non-whole-module-opt the generated swiftmodules are "linked" and
-    // this strips all serialized transparent functions. So we have to code-gen
-    // transparent functions in non-whole-module-opt.
-    if (isSILOnly && !info.HasMultipleIGMs && info.IsWholeModule)
-      return RESULT(Internal, Default, Default);
     return std::make_tuple(llvm::GlobalValue::ExternalLinkage,
                            PublicDefinitionVisibility, ExportedStorage);
 
@@ -1389,9 +1376,6 @@ getIRLinkage(const UniversalLinkageInfo &info, SILLinkage linkage,
 
   case SILLinkage::PublicExternal: {
     if (isDefinition) {
-      // Transparent function are not available externally.
-      if (isSILOnly)
-        return RESULT(LinkOnceODR, Hidden, Default);
       return std::make_tuple(llvm::GlobalValue::AvailableExternallyLinkage,
                              llvm::GlobalValue::DefaultVisibility,
                              ExportedStorage);
@@ -1426,7 +1410,6 @@ static void updateLinkageForDefinition(IRGenModule &IGM,
   UniversalLinkageInfo linkInfo(IGM);
   auto linkage =
       getIRLinkage(linkInfo, entity.getLinkage(ForDefinition),
-                   entity.isSILOnly(),
                    ForDefinition, entity.isWeakImported(IGM.getSwiftModule()));
   global->setLinkage(std::get<0>(linkage));
   global->setVisibility(std::get<1>(linkage));
@@ -1458,7 +1441,6 @@ LinkInfo LinkInfo::get(const UniversalLinkageInfo &linkInfo,
 
   std::tie(result.Linkage, result.Visibility, result.DLLStorageClass) =
       getIRLinkage(linkInfo, entity.getLinkage(isDefinition),
-                   entity.isSILOnly(),
                    isDefinition, entity.isWeakImported(swiftModule));
 
   result.ForDefinition = isDefinition;
@@ -1469,14 +1451,13 @@ LinkInfo LinkInfo::get(const UniversalLinkageInfo &linkInfo,
 LinkInfo LinkInfo::get(const UniversalLinkageInfo &linkInfo,
                        StringRef name,
                        SILLinkage linkage,
-                       bool isSILOnly,
                        ForDefinition_t isDefinition,
                        bool isWeakImported) {
   LinkInfo result;
 
   result.Name += name;
   std::tie(result.Linkage, result.Visibility, result.DLLStorageClass) =
-    getIRLinkage(linkInfo, linkage, isSILOnly,
+    getIRLinkage(linkInfo, linkage,
                  isDefinition, isWeakImported);
   result.ForDefinition = isDefinition;
   return result;
@@ -1490,7 +1471,8 @@ static bool isPointerTo(llvm::Type *ptrTy, llvm::Type *objTy) {
 llvm::Function *irgen::createFunction(IRGenModule &IGM,
                                       LinkInfo &linkInfo,
                                       const Signature &signature,
-                                      llvm::Function *insertBefore) {
+                                      llvm::Function *insertBefore,
+                                      OptimizationMode FuncOptMode) {
   auto name = linkInfo.getName();
 
   llvm::Function *existing = IGM.Module.getFunction(name);
@@ -1519,7 +1501,7 @@ llvm::Function *irgen::createFunction(IRGenModule &IGM,
  }
 
   llvm::AttrBuilder initialAttrs;
-  IGM.constructInitialFnAttributes(initialAttrs);
+  IGM.constructInitialFnAttributes(initialAttrs, FuncOptMode);
   // Merge initialAttrs with attrs.
   auto updatedAttrs =
     signature.getAttributes().addAttributes(IGM.getLLVMContext(),
@@ -1901,7 +1883,8 @@ llvm::Function *IRGenModule::getAddrOfSILFunction(SILFunction *f,
                                llvm::AttributeList::FunctionIndex,
                                llvm::Attribute::ReadOnly);
   }
-  fn = createFunction(*this, link, signature, insertBefore);
+  fn = createFunction(*this, link, signature, insertBefore,
+                      f->getOptimizationMode());
 
   // If we have an order number for this function, set it up as appropriate.
   if (hasOrderNumber) {
@@ -3138,11 +3121,10 @@ IRGenModule::getAddrOfGlobalConstantString(StringRef utf8) {
   metaclass = llvm::ConstantExpr::getBitCast(metaclass, TypeMetadataPtrTy);
 
   // Get a reference count of two.
-  auto *strongRefCountInit = llvm::ConstantInt::get(
-      Int32Ty,
-      InlineRefCountBits(0 /*unowned ref count*/, 2 /*strong ref count*/)
+  auto *refCountInit = llvm::ConstantInt::get(
+      IntPtrTy,
+      InlineRefCountBits(1 /* "extra" strong ref count*/, 1 /* unowned count */)
           .getBitsValue());
-  auto *unownedRefCountInit = llvm::ConstantInt::get(Int32Ty, 0);
 
   auto *count = llvm::ConstantInt::get(Int32Ty, utf8.size());
   // Capacity is length plus one because of the implicitly added '\0'
@@ -3150,9 +3132,8 @@ IRGenModule::getAddrOfGlobalConstantString(StringRef utf8) {
   auto *capacity = llvm::ConstantInt::get(Int32Ty, utf8.size() + 1);
   auto *flags = llvm::ConstantInt::get(Int8Ty, 0);
 
-  // FIXME: Big endian-ness.
   llvm::Constant *heapObjectHeaderFields[] = {
-      metaclass, strongRefCountInit, unownedRefCountInit
+      metaclass, refCountInit
   };
 
   auto *initRefCountStruct = llvm::ConstantStruct::get(
@@ -3216,11 +3197,10 @@ IRGenModule::getAddrOfGlobalUTF16ConstantString(StringRef utf8) {
   metaclass = llvm::ConstantExpr::getBitCast(metaclass, TypeMetadataPtrTy);
 
   // Get a reference count of two.
-  auto *strongRefCountInit = llvm::ConstantInt::get(
-      Int32Ty,
-      InlineRefCountBits(0 /*unowned ref count*/, 2 /*strong ref count*/)
+  auto *refCountInit = llvm::ConstantInt::get(
+      IntPtrTy,
+      InlineRefCountBits(1 /* "extra" strong ref count*/, 1 /* unowned count */)
           .getBitsValue());
-  auto *unownedRefCountInit = llvm::ConstantInt::get(Int32Ty, 0);
 
   auto *count = llvm::ConstantInt::get(Int32Ty, utf16Length);
   auto *capacity = llvm::ConstantInt::get(Int32Ty, utf16Length + 1);
@@ -3228,7 +3208,7 @@ IRGenModule::getAddrOfGlobalUTF16ConstantString(StringRef utf8) {
   auto *padding = llvm::ConstantInt::get(Int8Ty, 0);
 
   llvm::Constant *heapObjectHeaderFields[] = {
-      metaclass, strongRefCountInit, unownedRefCountInit
+      metaclass, refCountInit
   };
 
   auto *initRefCountStruct = llvm::ConstantStruct::get(
@@ -3312,11 +3292,9 @@ IRGenModule::getAddrOfGenericWitnessTableInstantiationFunction(
     return entry;
   }
 
-  auto fnType = llvm::FunctionType::get(VoidTy,
-                                        { WitnessTablePtrTy,
-                                          TypeMetadataPtrTy,
-                                          Int8PtrPtrTy },
-                                        /*varargs*/ false);
+  auto fnType = llvm::FunctionType::get(
+      VoidTy, {WitnessTablePtrTy, TypeMetadataPtrTy, Int8PtrPtrTy},
+      /*varargs*/ false);
   Signature signature(fnType, llvm::AttributeList(), DefaultCC);
   LinkInfo link = LinkInfo::get(*this, entity, forDefinition);
   entry = createFunction(*this, link, signature);
@@ -3359,9 +3337,12 @@ IRGenModule::getAddrOfWitnessTableAccessFunction(
   }
 
   llvm::FunctionType *fnType;
-  if (conf->getDeclContext()->isGenericContext()) {
-    fnType = llvm::FunctionType::get(WitnessTablePtrTy, {TypeMetadataPtrTy},
-                                     false);
+  if (conf->witnessTableAccessorRequiresArguments()) {
+    // conditional requirements are passed indirectly, as an array of witness
+    // tables.
+    fnType = llvm::FunctionType::get(
+        WitnessTablePtrTy, {TypeMetadataPtrTy, WitnessTablePtrPtrTy, SizeTy},
+        false);
   } else {
     fnType = llvm::FunctionType::get(WitnessTablePtrTy, false);
   }
